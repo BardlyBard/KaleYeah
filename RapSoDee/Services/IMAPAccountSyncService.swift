@@ -83,6 +83,7 @@ enum IMAPAccountSyncService {
                         )
                     )
                 }
+                let remoteID = "\(provider.rawValue)|\(info.name)|\(item.uid)"
                 let msg = MailMessage(
                     id: id,
                     accountID: accountID,
@@ -101,7 +102,9 @@ enum IMAPAccountSyncService {
                     attachments: attachments,
                     deliveredTo: email,
                     disposition: .normal,
-                    isDraft: info.kind == .drafts
+                    isDraft: info.kind == .drafts,
+                    remoteID: remoteID,
+                    internetMessageId: item.internetMessageId
                 )
                 all.append(msg)
             }

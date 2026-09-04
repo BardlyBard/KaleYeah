@@ -142,7 +142,7 @@ enum MicrosoftGraphMailService {
         struct GraphList: Decodable {
             var value: [GraphMessage]?
         }
-        let select = "id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
+        let select = "id,internetMessageId,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
         let list: GraphList = try await getJSON(
             path: folderPath,
             accessToken: accessToken,
@@ -155,9 +155,10 @@ enum MicrosoftGraphMailService {
 
         var out: [MailMessage] = []
         for gm in list.value ?? [] {
-            let id = stableMessageID(email: accountEmail, mailbox: mailboxKey, graphID: gm.id ?? UUID().uuidString)
+            guard let graphID = gm.id, !graphID.isEmpty else { continue }
+            let id = stableMessageID(graphID: graphID)
             var attachments: [MailAttachment] = []
-            if gm.hasAttachments == true, let graphID = gm.id {
+            if gm.hasAttachments == true {
                 attachments = try await fetchFileAttachments(
                     messageGraphID: graphID,
                     accessToken: accessToken,
@@ -170,9 +171,9 @@ enum MicrosoftGraphMailService {
                     accountID: accountID,
                     folderID: folderID,
                     accountEmail: accountEmail,
-                    mailboxKey: mailboxKey,
                     isDraft: isDraft,
                     messageID: id,
+                    remoteID: graphID,
                     attachments: attachments
                 )
             )
@@ -226,9 +227,9 @@ enum MicrosoftGraphMailService {
         accountID: UUID,
         folderID: UUID,
         accountEmail: String,
-        mailboxKey: String,
         isDraft: Bool,
         messageID: UUID,
+        remoteID: String,
         attachments: [MailAttachment]
     ) -> MailMessage {
         let fromAddr = gm.from?.emailAddress?.address ?? ""
@@ -244,6 +245,7 @@ enum MicrosoftGraphMailService {
             ?? gm.sentDateTime.flatMap(parseGraphDate)
             ?? Date()
         let flagged = (gm.flag?.flagStatus ?? "").lowercased() == "flagged"
+        let internetId = gm.internetMessageId?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return MailMessage(
             id: messageID,
@@ -263,12 +265,15 @@ enum MicrosoftGraphMailService {
             attachments: attachments,
             deliveredTo: accountEmail,
             disposition: .normal,
-            isDraft: isDraft
+            isDraft: isDraft,
+            remoteID: remoteID,
+            internetMessageId: (internetId?.isEmpty == false) ? internetId : nil
         )
     }
 
-    private static func stableMessageID(email: String, mailbox: String, graphID: String) -> UUID {
-        let raw = "rapsodee.graph.office365|\(email.lowercased())|\(mailbox)|\(graphID)"
+    /// Stable local UUID derived only from Graph id (immutable when Prefer IdType=ImmutableId).
+    private static func stableMessageID(graphID: String) -> UUID {
+        let raw = "rapsodee.graph.office365|\(graphID)"
         var hash = [UInt8](repeating: 0, count: 16)
         let bytes = Array(raw.utf8)
         for (i, b) in bytes.enumerated() {
@@ -307,6 +312,7 @@ enum MicrosoftGraphMailService {
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("IdType=\"ImmutableId\"", forHTTPHeaderField: "Prefer")
 
         let data: Data
         let response: URLResponse
@@ -380,6 +386,7 @@ enum MicrosoftGraphMailService {
 
 private struct GraphMessage: Decodable {
     var id: String?
+    var internetMessageId: String?
     var subject: String?
     var bodyPreview: String?
     var body: GraphBody?

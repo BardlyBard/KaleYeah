@@ -564,6 +564,7 @@ final class DemoMailStore: MailStore {
             gmailLastError = "Gmail folders missing"
             return
         }
+        if gmailIsSyncing { return }
         gmailIsSyncing = true
         gmailLastError = nil
         gmailSyncStatus = "Syncing Gmail…"
@@ -575,24 +576,13 @@ final class DemoMailStore: MailStore {
                 accountID: account.id,
                 folderIDs: folderIDs
             )
-            // Replace live messages for this account; keep local flags if same id.
-            var flagMemory: [UUID: (Bool, UUID?)] = [:]
-            for m in messages where m.accountID == account.id {
-                flagMemory[m.id] = (m.isFlagged, m.flagID)
-            }
-            messages.removeAll { $0.accountID == account.id }
-            var newOnes: [MailMessage] = []
-            for var msg in fetched {
-                if let mem = flagMemory[msg.id], mem.0 {
-                    msg.isFlagged = true
-                    msg.flagID = mem.1
-                }
-                if !previousIDs.contains(msg.id) && !msg.isRead {
-                    newOnes.append(msg)
-                }
-                messages.append(msg)
-            }
-            messages.sort { $0.receivedAt > $1.receivedAt }
+            let synced = Set([folderIDs.inbox, folderIDs.sent, folderIDs.drafts])
+            let newOnes = upsertSyncedMessages(
+                accountID: account.id,
+                syncedFolderIDs: synced,
+                fetched: fetched,
+                previousIDs: previousIDs
+            )
             gmailSyncStatus = result.status
             gmailNeedsSetup = false
             for msg in newOnes.prefix(3) {
@@ -635,6 +625,7 @@ final class DemoMailStore: MailStore {
     func bootstrapLiveAccountsOnLaunch() async {
         office365IsSyncing = false
         office365SyncStartedAt = nil
+        deduplicateMessagesByRemoteID()
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
         applyPersistedDisplayNames()
@@ -927,6 +918,7 @@ final class DemoMailStore: MailStore {
             office365LastError = "Microsoft 365 folders missing"
             return
         }
+        if office365IsSyncing { return }
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
@@ -962,23 +954,13 @@ final class DemoMailStore: MailStore {
             if payload.email.lowercased() != accountEmailHint.lowercased() {
                 _ = ensureOffice365Account(email: payload.email, id: accountID)
             }
-            var flagMemory: [UUID: (Bool, UUID?)] = [:]
-            for m in messages where m.accountID == accountID {
-                flagMemory[m.id] = (m.isFlagged, m.flagID)
-            }
-            messages.removeAll { $0.accountID == accountID }
-            var newOnes: [MailMessage] = []
-            for var msg in payload.messages {
-                if let mem = flagMemory[msg.id], mem.0 {
-                    msg.isFlagged = true
-                    msg.flagID = mem.1
-                }
-                if !previousIDs.contains(msg.id) && !msg.isRead {
-                    newOnes.append(msg)
-                }
-                messages.append(msg)
-            }
-            messages.sort { $0.receivedAt > $1.receivedAt }
+            let synced = Set([folderIDs.inbox, folderIDs.sent])
+            let newOnes = upsertSyncedMessages(
+                accountID: accountID,
+                syncedFolderIDs: synced,
+                fetched: payload.messages,
+                previousIDs: previousIDs
+            )
             office365SyncStatus = payload.status
             office365NeedsSetup = false
             for msg in newOnes.prefix(3) {
@@ -1051,6 +1033,192 @@ final class DemoMailStore: MailStore {
             group.cancelAll()
             return value
         }
+    }
+
+
+    // MARK: - Sync upsert / dedupe
+
+    /// Merge fetched live mail by `remoteID` (fallback: internetMessageId). Preserves local UUID,
+    /// named flags, and snooze. Prunes stale rows only in synced folders.
+    @discardableResult
+    private func upsertSyncedMessages(
+        accountID: UUID,
+        syncedFolderIDs: Set<UUID>,
+        fetched: [MailMessage],
+        previousIDs: Set<UUID>
+    ) -> [MailMessage] {
+        var byRemote: [String: Int] = [:]
+        var byInternet: [String: Int] = [:]
+        for (idx, m) in messages.enumerated() where m.accountID == accountID {
+            if let r = normalizedRemoteID(m.remoteID) {
+                byRemote[r] = idx
+            }
+            if let i = normalizedInternetMessageId(m.internetMessageId) {
+                byInternet[i] = idx
+            }
+        }
+
+        var seenRemote = Set<String>()
+        var seenInternet = Set<String>()
+        var newOnes: [MailMessage] = []
+        for var incoming in fetched {
+            let remoteKey = normalizedRemoteID(incoming.remoteID)
+            let internetKey = normalizedInternetMessageId(incoming.internetMessageId)
+
+            var matchIndex: Int?
+            if let remoteKey, let idx = byRemote[remoteKey] {
+                matchIndex = idx
+            } else if let internetKey, let idx = byInternet[internetKey] {
+                matchIndex = idx
+            }
+
+            if let idx = matchIndex, messages.indices.contains(idx) {
+                let local = messages[idx]
+                incoming.id = local.id
+                // Keep local named-flag / snooze state.
+                if local.isFlagged {
+                    incoming.isFlagged = true
+                    incoming.flagID = local.flagID ?? incoming.flagID
+                } else if local.flagID != nil {
+                    incoming.flagID = local.flagID
+                    incoming.isFlagged = true
+                }
+                if let until = local.snoozeUntil {
+                    incoming.snoozeUntil = until
+                    incoming.folderID = local.folderID
+                }
+                // Keep server read state from fetch; local read already matches if same id path.
+                if local.isRead && !incoming.isRead {
+                    // User may have marked read locally before server caught up — keep read.
+                    incoming.isRead = true
+                }
+                messages[idx] = incoming
+                if let remoteKey {
+                    byRemote[remoteKey] = idx
+                    seenRemote.insert(remoteKey)
+                }
+                if let internetKey {
+                    byInternet[internetKey] = idx
+                    seenInternet.insert(internetKey)
+                }
+            } else {
+                if !previousIDs.contains(incoming.id) && !incoming.isRead {
+                    newOnes.append(incoming)
+                }
+                messages.append(incoming)
+                let idx = messages.count - 1
+                if let remoteKey {
+                    byRemote[remoteKey] = idx
+                    seenRemote.insert(remoteKey)
+                }
+                if let internetKey {
+                    byInternet[internetKey] = idx
+                    seenInternet.insert(internetKey)
+                }
+            }
+        }
+
+        // Drop stale copies in synced folders that were not returned this pass.
+        messages.removeAll { m in
+            guard m.accountID == accountID else { return false }
+            guard syncedFolderIDs.contains(m.folderID) else { return false }
+            guard m.snoozeUntil == nil else { return false }
+            if let r = normalizedRemoteID(m.remoteID) {
+                return !seenRemote.contains(r)
+            }
+            if let i = normalizedInternetMessageId(m.internetMessageId) {
+                return !seenInternet.contains(i)
+            }
+            // Legacy rows without remote keys: remove from synced folders on replace.
+            return true
+        }
+
+        deduplicateMessagesByRemoteID(accountID: accountID)
+        messages.sort { $0.receivedAt > $1.receivedAt }
+        return newOnes
+    }
+
+    /// Collapse duplicate rows that share remoteID / internetMessageId within an account.
+    /// Keeps the copy with local flag/snooze state when present, otherwise the newest.
+    func deduplicateMessagesByRemoteID(accountID: UUID? = nil) {
+        var keep: [MailMessage] = []
+        var chosenRemote: [String: Int] = [:]
+        var chosenInternet: [String: Int] = [:]
+
+        for msg in messages {
+            if let accountID, msg.accountID != accountID {
+                keep.append(msg)
+                continue
+            }
+
+            let remoteKey = normalizedRemoteID(msg.remoteID).map { "\(msg.accountID.uuidString)|r|\($0)" }
+            let internetKey = normalizedInternetMessageId(msg.internetMessageId).map { "\(msg.accountID.uuidString)|i|\($0)" }
+
+            if remoteKey == nil && internetKey == nil {
+                keep.append(msg)
+                continue
+            }
+
+            var existingIndex: Int?
+            if let remoteKey, let idx = chosenRemote[remoteKey] {
+                existingIndex = idx
+            } else if let internetKey, let idx = chosenInternet[internetKey] {
+                existingIndex = idx
+            }
+
+            if let idx = existingIndex {
+                keep[idx] = preferredDuplicate(keep[idx], msg)
+                let winner = keep[idx]
+                if let remoteKey {
+                    chosenRemote[remoteKey] = idx
+                }
+                if let ik = normalizedInternetMessageId(winner.internetMessageId).map({ "\(winner.accountID.uuidString)|i|\($0)" }) {
+                    chosenInternet[ik] = idx
+                }
+            } else {
+                let idx = keep.count
+                keep.append(msg)
+                if let remoteKey {
+                    chosenRemote[remoteKey] = idx
+                }
+                if let internetKey {
+                    chosenInternet[internetKey] = idx
+                }
+            }
+        }
+
+        if keep.count != messages.count {
+            messages = keep
+        }
+    }
+
+    private func preferredDuplicate(_ a: MailMessage, _ b: MailMessage) -> MailMessage {
+        let aLocal = a.isFlagged || a.flagID != nil || a.snoozeUntil != nil
+        let bLocal = b.isFlagged || b.flagID != nil || b.snoozeUntil != nil
+        if aLocal != bLocal {
+            return aLocal ? a : b
+        }
+        // Prefer the one that already has a remoteID populated.
+        if (a.remoteID?.isEmpty == false) != (b.remoteID?.isEmpty == false) {
+            return (a.remoteID?.isEmpty == false) ? a : b
+        }
+        return a.receivedAt >= b.receivedAt ? a : b
+    }
+
+    private func normalizedRemoteID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedInternetMessageId(_ value: String?) -> String? {
+        guard let value else { return nil }
+        var trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<"), trimmed.hasSuffix(">"), trimmed.count > 2 {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        }
+        trimmed = trimmed.lowercased()
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: - Seed

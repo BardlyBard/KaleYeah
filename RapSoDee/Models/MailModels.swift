@@ -212,6 +212,10 @@ struct MailMessage: Identifiable, Hashable, Codable {
     var deliveredTo: String
     var disposition: MessageDisposition
     var isDraft: Bool
+    /// Provider-stable id (Graph message id, or IMAP `provider|mailbox|uid`).
+    var remoteID: String?
+    /// RFC 5322 Message-ID when available (Graph `internetMessageId` / IMAP Message-ID).
+    var internetMessageId: String?
 
     init(
         id: UUID = UUID(),
@@ -233,7 +237,9 @@ struct MailMessage: Identifiable, Hashable, Codable {
         attachments: [MailAttachment] = [],
         deliveredTo: String,
         disposition: MessageDisposition = .normal,
-        isDraft: Bool = false
+        isDraft: Bool = false,
+        remoteID: String? = nil,
+        internetMessageId: String? = nil
     ) {
         self.id = id
         self.accountID = accountID
@@ -255,6 +261,40 @@ struct MailMessage: Identifiable, Hashable, Codable {
         self.deliveredTo = deliveredTo
         self.disposition = disposition
         self.isDraft = isDraft
+        self.remoteID = remoteID
+        self.internetMessageId = internetMessageId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, accountID, folderID, fromName, fromAddress, toAddresses, ccAddresses
+        case subject, snippet, body, isHTML, receivedAt, isRead, isFlagged, flagID
+        case snoozeUntil, attachments, deliveredTo, disposition, isDraft, remoteID, internetMessageId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        accountID = try c.decode(UUID.self, forKey: .accountID)
+        folderID = try c.decode(UUID.self, forKey: .folderID)
+        fromName = try c.decode(String.self, forKey: .fromName)
+        fromAddress = try c.decode(String.self, forKey: .fromAddress)
+        toAddresses = try c.decode([String].self, forKey: .toAddresses)
+        ccAddresses = try c.decodeIfPresent([String].self, forKey: .ccAddresses) ?? []
+        subject = try c.decode(String.self, forKey: .subject)
+        snippet = try c.decode(String.self, forKey: .snippet)
+        body = try c.decode(String.self, forKey: .body)
+        isHTML = try c.decodeIfPresent(Bool.self, forKey: .isHTML) ?? false
+        receivedAt = try c.decode(Date.self, forKey: .receivedAt)
+        isRead = try c.decode(Bool.self, forKey: .isRead)
+        isFlagged = try c.decode(Bool.self, forKey: .isFlagged)
+        flagID = try c.decodeIfPresent(UUID.self, forKey: .flagID)
+        snoozeUntil = try c.decodeIfPresent(Date.self, forKey: .snoozeUntil)
+        attachments = try c.decodeIfPresent([MailAttachment].self, forKey: .attachments) ?? []
+        deliveredTo = try c.decode(String.self, forKey: .deliveredTo)
+        disposition = try c.decodeIfPresent(MessageDisposition.self, forKey: .disposition) ?? .normal
+        isDraft = try c.decodeIfPresent(Bool.self, forKey: .isDraft) ?? false
+        remoteID = try c.decodeIfPresent(String.self, forKey: .remoteID)
+        internetMessageId = try c.decodeIfPresent(String.self, forKey: .internetMessageId)
     }
 }
 
