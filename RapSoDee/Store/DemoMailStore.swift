@@ -792,11 +792,12 @@ final class DemoMailStore: MailStore {
 
     /// Escape hatch when Graph/MSAL hangs — unlocks Sign in / Sync / Sign out immediately.
     func cancelOffice365Sync() {
+        MSALAuthService.cancelInteractiveSession()
         office365IsSyncing = false
         office365SyncStartedAt = nil
-        office365SyncStatus = "Sync cancelled"
+        office365SyncStatus = "Sync / sign-in cancelled"
         if office365LastError == nil {
-            office365LastError = "Previous sync was cancelled. Try Sync now again."
+            office365LastError = "Previous Microsoft session was cancelled. Try Sign in with Microsoft again."
         }
     }
 

@@ -1,8 +1,23 @@
 import SwiftUI
 import SwiftData
+import AppKit
+
+/// Catches custom-scheme redirects (msauth.local.rapsodee.mail://auth) that arrive via AppKit.
+final class RapSoDeeAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            MSALAuthService.handle(url: url)
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // No-op; useful hook if we later drain a pending auth redirect.
+    }
+}
 
 @main
 struct RapSoDeeApp: App {
+    @NSApplicationDelegateAdaptor(RapSoDeeAppDelegate.self) private var appDelegate
     @State private var store = DemoMailStore()
 
     var sharedModelContainer: ModelContainer = {

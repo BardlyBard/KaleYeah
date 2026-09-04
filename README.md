@@ -95,6 +95,15 @@ Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read` (MSAL add
 - Gmail App Password path is unchanged.
 - Basic M365 password UI is removed (basic auth is disabled).
 
+### After Allow (OAuth return)
+
+RapSoDee uses MSAL **ASWebAuthenticationSession** (`webviewType = .authenticationSession`) with URL scheme `msauth.local.rapsodee.mail` (Info.plist `CFBundleURLTypes`) and Entra redirect **`msauth.local.rapsodee.mail://auth`**.
+
+1. Tap **Sign in with Microsoft** → system auth UI / browser appears.
+2. Sign in and tap **Allow**.
+3. **Expected:** auth UI dismisses and **RapSoDee comes forward** signed in, then sync starts.
+4. If Safari still shows a blank “you can close this” page, click back to RapSoDee once. If Settings says *Only one interactive session is allowed at a time*, tap **Clear stuck sign-in** / **Cancel sign-in / sync**, then Sign in again (RapSoDee cancels the orphan session and retries once automatically).
+
 ## Project layout
 
 ```

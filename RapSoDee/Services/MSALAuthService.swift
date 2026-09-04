@@ -84,6 +84,7 @@ final class MSALAuthService {
 
     private var application: MSALPublicClientApplication?
     private var presentationHost: MSALPresentationHost?
+    private var interactiveInFlight = false
     private(set) var signedInUsername: String?
     private(set) var signedInDisplayName: String?
 
@@ -135,25 +136,47 @@ final class MSALAuthService {
         }
     }
 
+    /// Dismiss any orphan ASWebAuthenticationSession / embedded auth UI left from a failed handoff.
+    @discardableResult
+    nonisolated static func cancelInteractiveSession() -> Bool {
+        let cancelled = MSALPublicClientApplication.cancelCurrentWebAuthSession()
+        Task { @MainActor in
+            shared.interactiveInFlight = false
+        }
+        return cancelled
+    }
+
     /// Interactive sign-in. Prefer login hint for Kale Yeah mailbox.
     func signIn(loginHint: String? = Office365Defaults.defaultEmail) async throws -> String {
         rebuildApplicationIfPossible()
         guard let application else { throw MSALAuthError.missingClientID }
 
-        let presenter = try makePresentingViewController()
-        let webParams = MSALWebviewParameters(authPresentationViewController: presenter)
-        let parameters = MSALInteractiveTokenParameters(scopes: MSALAppConfig.scopes, webviewParameters: webParams)
-        if let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines), !hint.isEmpty {
-            parameters.loginHint = hint
+        // Clear orphan sessions from a previous Safari/ASWebAuthenticationSession that never returned.
+        Self.cancelInteractiveSession()
+        if interactiveInFlight {
+            interactiveInFlight = false
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        parameters.promptType = .selectAccount
 
-        let result = try await acquireTokenInteractive(application: application, parameters: parameters)
+        let result: MSALResult
+        do {
+            result = try await acquireTokenInteractiveOnce(application: application, loginHint: loginHint)
+        } catch {
+            if Self.isInteractiveSessionBusy(error) {
+                Self.cancelInteractiveSession()
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                result = try await acquireTokenInteractiveOnce(application: application, loginHint: loginHint)
+            } else {
+                throw error
+            }
+        }
+
         signedInUsername = result.account.username ?? loginHint
         signedInDisplayName = result.account.accountClaims?["name"] as? String
         if let username = signedInUsername {
             MSALAppConfig.rememberedSignedInEmail = username
         }
+        NSApp.activate(ignoringOtherApps: true)
         return result.accessToken
     }
 
@@ -183,6 +206,7 @@ final class MSALAuthService {
     }
 
     func signOut() async {
+        Self.cancelInteractiveSession()
         guard let application else {
             signedInUsername = nil
             signedInDisplayName = nil
@@ -202,17 +226,50 @@ final class MSALAuthService {
         MSALAppConfig.rememberedSignedInEmail = nil
     }
 
-    /// iOS uses handleMSALResponse; on macOS ASWebAuthenticationSession / WKWebView owns the redirect.
-    /// Kept so App.onOpenURL can call a single entry point without platform #ifs in the UI layer.
+    /// Forward custom-scheme redirects into MSAL where supported, and bring RapSoDee forward.
+    /// Entra redirect must remain `msauth.local.rapsodee.mail://auth`.
     static func handle(url: URL) {
+        guard url.scheme?.lowercased() == MSALAppConfig.urlScheme.lowercased() else { return }
+
+        Task { @MainActor in
+            NSApp.activate(ignoringOtherApps: true)
+            for window in NSApp.windows where window.isVisible {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+
         #if os(iOS)
         _ = MSALPublicClientApplication.handleMSALResponse(url, sourceApplication: nil)
         #else
-        _ = url // macOS: custom scheme is registered for Entra; session completes without this hook.
+        // macOS: ASWebAuthenticationSession normally completes without this hook.
+        // If a system browser still delivered the msauth:// URL to the app, activating
+        // RapSoDee above is the recovery path; cancel orphans if a second attempt starts.
+        NSLog("MSAL redirect received: \(url.absoluteString.prefix(120))…")
         #endif
     }
 
     // MARK: - Presentation
+
+    private func acquireTokenInteractiveOnce(
+        application: MSALPublicClientApplication,
+        loginHint: String?
+    ) async throws -> MSALResult {
+        let presenter = try makePresentingViewController()
+        let webParams = MSALWebviewParameters(authPresentationViewController: presenter)
+        // Prefer system auth session so Allow dismisses back into RapSoDee instead of leaving Safari hung.
+        webParams.webviewType = .authenticationSession
+        webParams.prefersEphemeralWebBrowserSession = false
+
+        let parameters = MSALInteractiveTokenParameters(scopes: MSALAppConfig.scopes, webviewParameters: webParams)
+        if let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines), !hint.isEmpty {
+            parameters.loginHint = hint
+        }
+        parameters.promptType = .selectAccount
+
+        interactiveInFlight = true
+        defer { interactiveInFlight = false }
+        return try await acquireTokenInteractive(application: application, parameters: parameters)
+    }
 
     private func makePresentingViewController() throws -> NSViewController {
         // Prefer an existing controller — never replace SwiftUI’s hosting controller.
@@ -272,6 +329,29 @@ final class MSALAuthService {
                 }
             }
         }
+    }
+
+    nonisolated private static func isInteractiveSessionBusy(_ error: Error) -> Bool {
+        if let auth = error as? MSALAuthError, case .underlying(let message) = auth {
+            if message.localizedCaseInsensitiveContains("Only one interactive session") {
+                return true
+            }
+        }
+        let ns = error as NSError
+        if ns.domain == MSALErrorDomain {
+            let busyCode = MSALInternalError.internalErrorInteractiveSessionAlreadyRunning.rawValue
+            if let code = ns.userInfo[MSALInternalErrorCodeKey] as? Int, code == busyCode {
+                return true
+            }
+            if let code = ns.userInfo[MSALInternalErrorCodeKey] as? NSNumber, code.intValue == busyCode {
+                return true
+            }
+            if let desc = ns.userInfo[MSALErrorDescriptionKey] as? String,
+               desc.localizedCaseInsensitiveContains("Only one interactive session") {
+                return true
+            }
+        }
+        return ns.localizedDescription.localizedCaseInsensitiveContains("Only one interactive session")
     }
 
     nonisolated private static func mapError(_ error: Error) -> Error {

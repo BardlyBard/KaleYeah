@@ -188,6 +188,10 @@ struct SettingsView: View {
                         }
                     }
 
+                    Text("After Allow, RapSoDee should come forward automatically. If Safari shows a blank page, click back to RapSoDee once — then use Cancel stuck sign-in if needed.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
                     // Escape hatch: unlock grayed-out buttons if Graph/MSAL hangs.
                     if store.office365IsSyncing || office365Busy {
                         HStack(spacing: 10) {
@@ -195,24 +199,35 @@ struct SettingsView: View {
                                 TimelineView(.periodic(from: .now, by: 1)) { context in
                                     let elapsed = Int(context.date.timeIntervalSince(started))
                                     Text(elapsed >= 15
-                                         ? "Still syncing (\(elapsed)s) — you can cancel"
-                                         : "Syncing… \(elapsed)s")
+                                         ? "Still working (\(elapsed)s) — you can cancel"
+                                         : "Working… \(elapsed)s")
                                         .font(.caption)
                                         .foregroundStyle(elapsed >= 15 ? .orange : .secondary)
                                 }
                             } else {
-                                Text("Syncing…")
+                                Text("Working…")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Cancel sync") {
+                            Button("Cancel sign-in / sync") {
                                 store.cancelOffice365Sync()
                                 office365Busy = false
                             }
                             .buttonStyle(.bordered)
                             .tint(.orange)
                         }
+                    } else if let err = store.office365LastError,
+                              err.localizedCaseInsensitiveContains("interactive session") {
+                        Button("Clear stuck sign-in") {
+                            MSALAuthService.cancelInteractiveSession()
+                            store.cancelOffice365Sync()
+                            office365Busy = false
+                            store.office365LastError = nil
+                            store.office365SyncStatus = "Cleared stuck Microsoft sign-in. Try Sign in again."
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
                     }
                 }
 
