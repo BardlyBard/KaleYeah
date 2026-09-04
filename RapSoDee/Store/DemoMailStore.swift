@@ -18,6 +18,12 @@ final class DemoMailStore: MailStore {
     /// Soft muse chime when new mail arrives (default on).
     var playSoundForNewMail: Bool = true
 
+    // MARK: Gmail live account
+    var gmailSyncStatus: String = ""
+    var gmailIsSyncing: Bool = false
+    var gmailNeedsSetup: Bool = true
+    var gmailLastError: String?
+
     private let archiveFolderID = UUID()
     private let trashFolderID = UUID()
     private let snoozedFolderID = UUID()
@@ -26,6 +32,8 @@ final class DemoMailStore: MailStore {
 
     init() {
         seed()
+        restoreGmailAccountShellIfNeeded()
+        gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
     }
 
     func account(for id: UUID) -> MailAccount? { accounts.first { $0.id == id } }
@@ -275,6 +283,14 @@ final class DemoMailStore: MailStore {
     }
 
     func sendCompose(_ draft: ComposeDraft) {
+        if let account = account(for: draft.accountID), account.isLiveGmail {
+            Task { @MainActor in await sendGmailCompose(draft) }
+            return
+        }
+        insertLocalSent(draft)
+    }
+
+    private func insertLocalSent(_ draft: ComposeDraft) {
         let sentFolder = folders.first { $0.kind == .sent && $0.accountID == draft.accountID }
         let folderID = sentFolder?.id ?? folders.first { $0.kind == .sent }?.id ?? UUID()
         let account = account(for: draft.accountID)
@@ -367,6 +383,220 @@ final class DemoMailStore: MailStore {
             return hit
         }
         return customs.first
+    }
+
+
+    // MARK: - Live Gmail
+
+    func gmailAccount() -> MailAccount? {
+        accounts.first { $0.isLiveGmail }
+    }
+
+    /// Ensure a Gmail account card exists when we have a remembered email (even before password).
+    func restoreGmailAccountShellIfNeeded() {
+        if gmailAccount() != nil { return }
+        let email = GmailSyncService.storedEmail() ?? GmailDefaults.defaultEmail
+        let id = GmailSyncService.storedAccountID() ?? UUID()
+        // Only materialize the live account if Keychain has creds OR user previously saved the email.
+        let hasCreds = KeychainCredentialStore.hasCredentials(forEmail: email)
+        let remembered = GmailSyncService.storedEmail() != nil
+        guard hasCreds || remembered else { return }
+        ensureGmailAccount(email: email, id: id)
+    }
+
+    @discardableResult
+    func ensureGmailAccount(email: String, id: UUID = UUID()) -> MailAccount {
+        if let existing = gmailAccount() {
+            if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
+                accounts[i].email = email
+                accounts[i].name = "Gmail"
+            }
+            GmailSyncService.rememberAccount(email: email, id: existing.id)
+            return accounts.first { $0.isLiveGmail }!
+        }
+        let account = MailAccount(
+            id: id,
+            name: "Gmail",
+            email: email,
+            tintHex: GmailDefaults.tintHex,
+            signature: "— Derek",
+            includeInUnifiedInbox: true,
+            isCalliope: false,
+            sortOrder: -1,
+            inboxPinned: true,
+            isLiveGmail: true
+        )
+        accounts.insert(account, at: 0)
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
+        }
+        let base = -10
+        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true)
+        let sent = MailFolder(accountID: id, name: "Sent", kind: .sent, sortOrder: base + 1)
+        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2)
+        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3)
+        let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
+        folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
+        GmailSyncService.rememberAccount(email: email, id: id)
+        return account
+    }
+
+    func removeGmailAccount() {
+        guard let account = gmailAccount() else { return }
+        KeychainCredentialStore.deletePassword(forEmail: account.email)
+        GmailSyncService.clearRememberedAccount()
+        messages.removeAll { $0.accountID == account.id }
+        folders.removeAll { $0.accountID == account.id }
+        accounts.removeAll { $0.id == account.id }
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
+        }
+        gmailNeedsSetup = true
+        gmailSyncStatus = "Gmail account removed — demo mail still available."
+        gmailLastError = nil
+    }
+
+    func saveGmailCredentials(email: String, appPassword: String) throws {
+        let cleaned = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pass = appPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, !pass.isEmpty else {
+            throw MailNetError.unexpected("Email and App Password are required")
+        }
+        try KeychainCredentialStore.savePassword(pass, forEmail: cleaned)
+        _ = ensureGmailAccount(email: cleaned, id: GmailSyncService.storedAccountID() ?? UUID())
+        gmailNeedsSetup = false
+        gmailSyncStatus = "Credentials saved in Keychain."
+        gmailLastError = nil
+    }
+
+    func testGmailConnection() async {
+        guard let account = gmailAccount() else {
+            gmailLastError = "Add a Gmail account first"
+            return
+        }
+        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+            gmailLastError = "No App Password in Keychain"
+            gmailNeedsSetup = true
+            return
+        }
+        gmailIsSyncing = true
+        gmailLastError = nil
+        gmailSyncStatus = "Testing connection…"
+        do {
+            try await GmailSyncService.testConnection(email: account.email, password: password)
+            gmailSyncStatus = "Connection OK (IMAP + SMTP)"
+        } catch {
+            gmailLastError = error.localizedDescription
+            gmailSyncStatus = "Connection failed"
+        }
+        gmailIsSyncing = false
+    }
+
+    func syncGmailNow() async {
+        guard let account = gmailAccount() else {
+            gmailNeedsSetup = true
+            gmailSyncStatus = "Add Gmail in Settings → Accounts"
+            return
+        }
+        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+            gmailNeedsSetup = true
+            gmailSyncStatus = "Paste a Gmail App Password in Settings"
+            return
+        }
+        guard let folderIDs = gmailFolderIDs(for: account.id) else {
+            gmailLastError = "Gmail folders missing"
+            return
+        }
+        gmailIsSyncing = true
+        gmailLastError = nil
+        gmailSyncStatus = "Syncing Gmail…"
+        let previousIDs = Set(messages.filter { $0.accountID == account.id }.map(\.id))
+        do {
+            let (fetched, _, result) = try await GmailSyncService.sync(
+                email: account.email,
+                password: password,
+                accountID: account.id,
+                folderIDs: folderIDs
+            )
+            // Replace live messages for this account; keep local flags if same id.
+            var flagMemory: [UUID: (Bool, UUID?)] = [:]
+            for m in messages where m.accountID == account.id {
+                flagMemory[m.id] = (m.isFlagged, m.flagID)
+            }
+            messages.removeAll { $0.accountID == account.id }
+            var newOnes: [MailMessage] = []
+            for var msg in fetched {
+                if let mem = flagMemory[msg.id], mem.0 {
+                    msg.isFlagged = true
+                    msg.flagID = mem.1
+                }
+                if !previousIDs.contains(msg.id) && !msg.isRead {
+                    newOnes.append(msg)
+                }
+                messages.append(msg)
+            }
+            messages.sort { $0.receivedAt > $1.receivedAt }
+            gmailSyncStatus = result.status
+            gmailNeedsSetup = false
+            for msg in newOnes.prefix(3) {
+                applyNotificationPolicy(for: msg)
+            }
+        } catch {
+            gmailLastError = error.localizedDescription
+            gmailSyncStatus = "Sync failed"
+        }
+        gmailIsSyncing = false
+    }
+
+    func bootstrapGmailOnLaunch() async {
+        restoreGmailAccountShellIfNeeded()
+        if let account = gmailAccount(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
+            gmailNeedsSetup = false
+            await syncGmailNow()
+        } else {
+            gmailNeedsSetup = true
+            gmailSyncStatus = "Demo accounts ready. Add Gmail App Password in Settings → Accounts."
+        }
+    }
+
+    private func gmailFolderIDs(for accountID: UUID) -> GmailFolderIDs? {
+        guard
+            let inbox = folders.first(where: { $0.accountID == accountID && $0.kind == .inbox })?.id,
+            let sent = folders.first(where: { $0.accountID == accountID && $0.kind == .sent })?.id,
+            let drafts = folders.first(where: { $0.accountID == accountID && $0.kind == .drafts })?.id,
+            let archive = folders.first(where: { $0.accountID == accountID && $0.kind == .archive })?.id,
+            let trash = folders.first(where: { $0.accountID == accountID && $0.kind == .trash })?.id
+        else { return nil }
+        return GmailFolderIDs(inbox: inbox, sent: sent, drafts: drafts, archive: archive, trash: trash)
+    }
+
+    private func sendGmailCompose(_ draft: ComposeDraft) async {
+        guard let account = account(for: draft.accountID), account.isLiveGmail else {
+            insertLocalSent(draft)
+            return
+        }
+        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+            gmailLastError = "Missing App Password — open Settings → Accounts"
+            gmailNeedsSetup = true
+            return
+        }
+        gmailIsSyncing = true
+        gmailSyncStatus = "Sending…"
+        do {
+            try await GmailSyncService.send(
+                email: account.email,
+                password: password,
+                draft: draft,
+                signature: account.signature
+            )
+            insertLocalSent(draft)
+            gmailSyncStatus = "Sent via Gmail SMTP"
+            gmailLastError = nil
+        } catch {
+            gmailLastError = error.localizedDescription
+            gmailSyncStatus = "Send failed"
+        }
+        gmailIsSyncing = false
     }
 
     // MARK: - Seed

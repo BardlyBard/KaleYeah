@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var fileTarget: MailMessage?
     @State private var snoozeTarget: MailMessage?
     @State private var didHydrate = false
+    @State private var dismissGmailPrompt = UserDefaults.standard.bool(forKey: GmailDefaults.promptDismissedKey)
 
     private var visibleMessages: [MailMessage] {
         store.messages(for: selection)
@@ -59,6 +60,33 @@ struct ContentView: View {
         }
         .onAppear {
             hydrateFlagsIfNeeded()
+            Task { await store.bootstrapGmailOnLaunch() }
+        }
+        .overlay(alignment: .top) {
+            if store.gmailNeedsSetup && !dismissGmailPrompt {
+                HStack(spacing: 12) {
+                    Image(systemName: "envelope.badge")
+                        .foregroundStyle(MuseTheme.leaf)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Connect Gmail")
+                            .font(.headline)
+                        Text("Paste a Google App Password in Settings → Accounts for \(GmailDefaults.defaultEmail). Demo mail stays available.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Settings") { showSettings = true }
+                        .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
+                    Button("Later") {
+                        dismissGmailPrompt = true
+                        UserDefaults.standard.set(true, forKey: GmailDefaults.promptDismissedKey)
+                    }
+                    .buttonStyle(MuseCapsuleButtonStyle())
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous))
+                .padding(12)
+            }
         }
         .focusedSceneValue(\.rapActions, RapActions(
             archive: { archiveSelected() },
@@ -142,7 +170,9 @@ struct ContentView: View {
     private func makeDraft(_ mode: ComposeMode) -> ComposeDraft {
         switch mode {
         case .new:
-            let account = store.accounts.first { !$0.isCalliope } ?? store.accounts[0]
+            let account = store.gmailAccount()
+                ?? store.accounts.first { !$0.isCalliope }
+                ?? store.accounts[0]
             let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
             return ComposeDraft(
                 mode: .new,

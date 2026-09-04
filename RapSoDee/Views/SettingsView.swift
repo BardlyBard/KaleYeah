@@ -11,10 +11,84 @@ struct SettingsView: View {
     @State private var newFlagColor = Color(hex: "E07A3D")
     @State private var vipText = ""
     @State private var notificationPolicy = "focusAware"
+    @State private var gmailEmail = GmailDefaults.defaultEmail
+    @State private var gmailAppPassword = ""
+    @State private var gmailBusy = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Accounts — Gmail") {
+                    TextField("Email", text: $gmailEmail)
+                        .textContentType(.username)
+                    SecureField("Gmail App Password", text: $gmailAppPassword)
+                        .textContentType(.password)
+                    Text("Create an App Password at Google Account → Security (2FA required). Stored only in macOS Keychain — never committed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let gmail = store.gmailAccount() {
+                        HStack(spacing: 8) {
+                            Circle().fill(Color(hex: gmail.tintHex)).frame(width: 10, height: 10)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(gmail.name).font(.headline)
+                                Text(gmail.email).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if store.gmailIsSyncing || gmailBusy {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                    }
+
+                    if !store.gmailSyncStatus.isEmpty {
+                        Text(store.gmailSyncStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let err = store.gmailLastError, !err.isEmpty {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(store.gmailAccount() == nil ? "Add Gmail" : "Save Password") {
+                            Task { await saveGmail() }
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
+                        .disabled(gmailBusy || gmailAppPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button("Test connection") {
+                            Task {
+                                gmailBusy = true
+                                await store.testGmailConnection()
+                                gmailBusy = false
+                            }
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle())
+                        .disabled(store.gmailAccount() == nil || gmailBusy || store.gmailIsSyncing)
+
+                        Button("Sync now") {
+                            Task {
+                                gmailBusy = true
+                                await store.syncGmailNow()
+                                gmailBusy = false
+                            }
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle())
+                        .disabled(store.gmailAccount() == nil || gmailBusy || store.gmailIsSyncing)
+                    }
+
+                    if store.gmailAccount() != nil {
+                        Button("Remove Gmail account", role: .destructive) {
+                            store.removeGmailAccount()
+                            gmailAppPassword = ""
+                            gmailEmail = GmailDefaults.defaultEmail
+                        }
+                    }
+                }
+
                 Section("Unified Inbox — per-account toggles") {
                     ForEach(store.accounts) { account in
                         Toggle(isOn: Binding(
@@ -193,9 +267,30 @@ struct SettingsView: View {
             .onAppear {
                 loadSettingsBlob()
                 notificationPolicy = store.notificationPolicyRaw
+                if let email = store.gmailAccount()?.email ?? GmailSyncService.storedEmail() {
+                    gmailEmail = email
+                } else {
+                    gmailEmail = GmailDefaults.defaultEmail
+                }
             }
         }
         .frame(minWidth: 560, minHeight: 480)
+    }
+
+
+    private func saveGmail() async {
+        gmailBusy = true
+        do {
+            try store.saveGmailCredentials(email: gmailEmail, appPassword: gmailAppPassword)
+            gmailAppPassword = ""
+            await store.testGmailConnection()
+            if store.gmailLastError == nil {
+                await store.syncGmailNow()
+            }
+        } catch {
+            store.gmailLastError = error.localizedDescription
+        }
+        gmailBusy = false
     }
 
     private func liveFlag(_ id: UUID) -> MailFlag? {
@@ -247,6 +342,9 @@ struct SettingsView: View {
         if let data = row.accountsJSON, let accounts = try? JSONDecoder().decode([MailAccount].self, from: data) {
             // Keep live message IDs; merge settings fields onto seeded accounts by email.
             for account in accounts {
+                if account.isLiveGmail {
+                    continue // live Gmail is restored from Keychain / UserDefaults
+                }
                 if let i = store.accounts.firstIndex(where: { $0.email == account.email }) {
                     store.accounts[i].includeInUnifiedInbox = account.includeInUnifiedInbox
                     store.accounts[i].signature = account.signature

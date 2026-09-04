@@ -11,6 +11,8 @@ struct MailAccount: Identifiable, Hashable, Codable {
     var isCalliope: Bool
     var sortOrder: Int
     var inboxPinned: Bool
+    /// Live Gmail (IMAP/SMTP via app password). Demo accounts stay false.
+    var isLiveGmail: Bool
 
     init(
         id: UUID = UUID(),
@@ -21,7 +23,8 @@ struct MailAccount: Identifiable, Hashable, Codable {
         includeInUnifiedInbox: Bool = true,
         isCalliope: Bool = false,
         sortOrder: Int = 0,
-        inboxPinned: Bool = true
+        inboxPinned: Bool = true,
+        isLiveGmail: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -32,6 +35,25 @@ struct MailAccount: Identifiable, Hashable, Codable {
         self.isCalliope = isCalliope
         self.sortOrder = sortOrder
         self.inboxPinned = inboxPinned
+        self.isLiveGmail = isLiveGmail
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, email, tintHex, signature, includeInUnifiedInbox, isCalliope, sortOrder, inboxPinned, isLiveGmail
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        email = try c.decode(String.self, forKey: .email)
+        tintHex = try c.decode(String.self, forKey: .tintHex)
+        signature = try c.decodeIfPresent(String.self, forKey: .signature) ?? ""
+        includeInUnifiedInbox = try c.decodeIfPresent(Bool.self, forKey: .includeInUnifiedInbox) ?? true
+        isCalliope = try c.decodeIfPresent(Bool.self, forKey: .isCalliope) ?? false
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        inboxPinned = try c.decodeIfPresent(Bool.self, forKey: .inboxPinned) ?? true
+        isLiveGmail = try c.decodeIfPresent(Bool.self, forKey: .isLiveGmail) ?? false
     }
 }
 
