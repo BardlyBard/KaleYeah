@@ -22,7 +22,9 @@ struct MessageListView: View {
                 ForEach(messages) { message in
                     MessageRowView(message: message)
                         .tag(message.id)
-                        .listRowBackground(rowBackground(for: message))
+                        .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(rowWash(for: message))
                         .contextMenu {
                             Menu("Flag") {
                                 FlagMenuContent(
@@ -42,10 +44,22 @@ struct MessageListView: View {
                 }
             }
             .listStyle(.inset(alternatesRowBackgrounds: false))
+            .scrollContentBackground(.hidden)
             // Keep controls usable but never let leaf-green own row selection.
             .tint(MuseTheme.oatmeal)
             .background(DisableListSelectionHighlight())
         }
+        .background(
+            RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                .fill(MuseTheme.paperFill(scheme: colorScheme))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                .strokeBorder(MuseTheme.oatmeal.opacity(0.28), lineWidth: 1)
+        )
+        .padding(MuseTheme.paneInset)
+        .background(MuseTheme.paneChrome(scheme: colorScheme))
         .navigationTitle(title)
         .onChange(of: selection) { _, _ in
             if let first = messages.first {
@@ -90,12 +104,23 @@ struct MessageListView: View {
 
             Spacer()
             Text("\(messages.count)")
-                .font(.caption)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(MuseTheme.sage.opacity(0.8), in: Capsule())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private func rowWash(for message: MailMessage) -> some View {
+        let fill = rowBackground(for: message)
+        RoundedRectangle(cornerRadius: MuseTheme.cornerMed, style: .continuous)
+            .fill(fill)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
     }
 
     private func flagHex(for message: MailMessage) -> String {
@@ -144,7 +169,7 @@ struct MessageRowView: View {
                 .frame(width: 8, height: 8)
                 .padding(.top, 6)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(message.fromName)
                         .font(.headline)
@@ -185,7 +210,7 @@ struct MessageRowView: View {
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 
     private var flagColor: Color {

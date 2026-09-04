@@ -23,6 +23,7 @@ final class PersistedAppSettings {
     var filterRaw: String
     var vipAddressesCSV: String
     var notificationPolicyRaw: String
+    var playSoundForNewMail: Bool
     /// JSON blob mirroring account toggles / signatures for Stage 1 persistence.
     var accountsJSON: Data?
     var foldersJSON: Data?
@@ -34,6 +35,7 @@ final class PersistedAppSettings {
         filterRaw: String = MessageFilter.all.rawValue,
         vipAddressesCSV: String = "",
         notificationPolicyRaw: String = "focusAware",
+        playSoundForNewMail: Bool = true,
         accountsJSON: Data? = nil,
         foldersJSON: Data? = nil,
         ladderOrderJSON: Data? = nil
@@ -43,6 +45,7 @@ final class PersistedAppSettings {
         self.filterRaw = filterRaw
         self.vipAddressesCSV = vipAddressesCSV
         self.notificationPolicyRaw = notificationPolicyRaw
+        self.playSoundForNewMail = playSoundForNewMail
         self.accountsJSON = accountsJSON
         self.foldersJSON = foldersJSON
         self.ladderOrderJSON = ladderOrderJSON

@@ -98,6 +98,8 @@ struct ContentView: View {
                 systemImage: "envelope.open",
                 description: Text("Choose a message from the list — inbox is your working set.")
             )
+            .padding(MuseTheme.paneInset)
+            .background(MuseTheme.paper.opacity(0.55))
         }
     }
 

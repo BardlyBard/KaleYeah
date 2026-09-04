@@ -36,10 +36,14 @@ struct FilePickerSheet: View {
                     }
                 }
             }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .background(MuseTheme.paper.opacity(0.55))
             .navigationTitle("File Message")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .buttonStyle(MuseCapsuleButtonStyle())
                 }
             }
         }

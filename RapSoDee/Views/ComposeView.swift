@@ -3,6 +3,7 @@ import SwiftUI
 struct ComposeView: View {
     @Environment(DemoMailStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @State var draft: ComposeDraft
     var isPopOut: Bool
@@ -12,19 +13,28 @@ struct ComposeView: View {
     var body: some View {
         VStack(spacing: 0) {
             form
-            Divider()
+            Divider().opacity(0.4)
             TextEditor(text: $draft.body)
                 .font(.body)
-                .padding(8)
-            Divider()
-            HStack {
+                .padding(10)
+                .scrollContentBackground(.hidden)
+                .background(
+                    RoundedRectangle(cornerRadius: MuseTheme.cornerMed, style: .continuous)
+                        .fill(MuseTheme.paperFill(scheme: colorScheme))
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            Divider().opacity(0.4)
+            HStack(spacing: 10) {
                 if !isPopOut, let onPopOut {
                     Button("Pop Out") {
                         onPopOut(draft)
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 }
                 Spacer()
                 Button("Cancel") { close() }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 if isApproveEdit {
                     Button("Save to Approve") {
                         if case .editDraft(let message) = draft.mode {
@@ -34,6 +44,7 @@ struct ComposeView: View {
                         }
                         close()
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                     Button("Approve & Send") {
                         store.sendCompose(draft)
                         if case .editDraft(let message) = draft.mode {
@@ -41,20 +52,24 @@ struct ComposeView: View {
                         }
                         close()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(MuseTheme.approve)
+                    .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.approve))
                 } else {
                     Button("Send") {
                         store.sendCompose(draft)
                         close()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(MuseTheme.leaf)
+                    .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.leaf))
                 }
             }
             .padding(12)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(
+            RoundedRectangle(cornerRadius: isPopOut ? 0 : MuseTheme.cornerCard, style: .continuous)
+                .fill(MuseTheme.paperFill(scheme: colorScheme))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: isPopOut ? 0 : MuseTheme.cornerCard, style: .continuous))
+        .padding(isPopOut ? 0 : MuseTheme.paneInset)
+        .background(isPopOut ? Color.clear : MuseTheme.paneChrome(scheme: colorScheme))
         .onChange(of: draft) { _, newValue in
             if isPopOut {
                 ComposeSession.shared.update(newValue)
@@ -84,6 +99,7 @@ struct ComposeView: View {
             TextField("Subject", text: $draft.subject)
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .frame(maxHeight: 200)
     }
 

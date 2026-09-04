@@ -15,7 +15,7 @@ struct ReadingPaneView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Divider().opacity(0.45)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if message.disposition == .pendingApproval {
@@ -33,7 +33,17 @@ struct ReadingPaneView: View {
                 .padding(20)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(
+            RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                .fill(MuseTheme.paperFill(scheme: colorScheme))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                .strokeBorder(MuseTheme.oatmeal.opacity(0.28), lineWidth: 1)
+        )
+        .padding(MuseTheme.paneInset)
+        .background(MuseTheme.paneChrome(scheme: colorScheme))
         .onAppear {
             store.markRead(message.id, read: true)
         }
@@ -84,11 +94,20 @@ struct ReadingPaneView: View {
             }
         }
         .padding(16)
-        .background(headerFlagWash)
+        .background(
+            UnevenRoundedRectangle(
+                topLeadingRadius: MuseTheme.cornerCard,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: MuseTheme.cornerCard,
+                style: .continuous
+            )
+            .fill(headerFlagWash)
+        )
     }
 
     private var headerFlagWash: Color {
-        guard message.isFlagged else { return Color.clear }
+        guard message.isFlagged else { return MuseTheme.sage.opacity(0.35) }
         let hex: String
         if let id = message.flagID, let flag = store.flags.first(where: { $0.id == id }) {
             hex = flag.colorHex
@@ -104,18 +123,22 @@ struct ReadingPaneView: View {
         HStack(spacing: 8) {
             if message.disposition == .pendingApproval {
                 Button("Edit") { onApproveEdit() }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 Button("Approve & Send") {
                     store.approveAndSend(message.id)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(MuseTheme.approve)
+                .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.approve))
                 Button("Reject", role: .destructive) {
                     store.rejectApprove(message.id)
                 }
+                .buttonStyle(MuseCapsuleButtonStyle(tint: Color.red.opacity(0.85)))
             } else {
                 Button("Reply", action: onReply)
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 Button("Reply All", action: onReplyAll)
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 Button("Forward", action: onForward)
+                    .buttonStyle(MuseCapsuleButtonStyle())
                 FlagToolbarMenu(
                     flags: store.flags,
                     currentFlagID: message.flagID,
@@ -155,7 +178,7 @@ struct ReadingPaneView: View {
             Spacer()
         }
         .padding(12)
-        .background(MuseTheme.approveSoft, in: RoundedRectangle(cornerRadius: MuseTheme.cornerMed))
+        .background(MuseTheme.approveSoft, in: RoundedRectangle(cornerRadius: MuseTheme.cornerMed, style: .continuous))
     }
 
     private var attachmentsSection: some View {
@@ -180,10 +203,14 @@ struct ReadingPaneView: View {
                             previewAttachment = attachment
                         }
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                     .disabled(!attachment.isPreviewable)
                 }
                 .padding(10)
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .background(
+                    Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                )
             }
             Text("Previews are never automatic — tap Preview for PDF/images only.")
                 .font(.caption2)
@@ -203,9 +230,10 @@ struct AttachmentPreviewSheet: View {
                     .font(.headline)
                 Spacer()
                 Button("Done") { dismiss() }
+                    .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
             }
             if attachment.mimeType.hasPrefix("image/") {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: MuseTheme.cornerLarge, style: .continuous)
                     .fill(MuseTheme.sage)
                     .overlay {
                         VStack(spacing: 8) {
@@ -218,7 +246,7 @@ struct AttachmentPreviewSheet: View {
                     }
                     .frame(minHeight: 280)
             } else if attachment.mimeType == "application/pdf" {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: MuseTheme.cornerLarge, style: .continuous)
                     .fill(MuseTheme.paper)
                     .overlay {
                         VStack(spacing: 8) {

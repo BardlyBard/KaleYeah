@@ -18,7 +18,11 @@ targets:
       - path: RapSoDee
         excludes:
           - "**/.DS_Store"
+          - "Resources/Sounds/**"
       - path: RapSoDee/Resources/Assets.xcassets
+        buildPhase: resources
+        type: folder
+      - path: RapSoDee/Resources/Sounds
         buildPhase: resources
         type: folder
     settings:

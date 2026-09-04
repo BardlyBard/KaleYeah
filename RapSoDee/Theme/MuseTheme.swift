@@ -14,8 +14,14 @@ enum MuseTheme {
     static let approve = Color(red: 0.95, green: 0.55, blue: 0.12)
     static let approveSoft = Color(red: 0.98, green: 0.90, blue: 0.78)
 
-    static let cornerLarge: CGFloat = 16
+    // MARK: Corner radius scale (rounded cute, not cartoonish)
+    static let cornerTiny: CGFloat = 6
+    static let cornerSmall: CGFloat = 8
     static let cornerMed: CGFloat = 12
+    static let cornerLarge: CGFloat = 16
+    static let cornerCard: CGFloat = 20
+    /// Padding between pane chrome and floating paper cards
+    static let paneInset: CGFloat = 8
 
     static func accountTint(_ hex: String) -> Color {
         Color(hex: hex).opacity(0.14)
@@ -49,6 +55,39 @@ enum MuseTheme {
     static func flagHeaderWash(_ hex: String, scheme: ColorScheme = .light) -> Color {
         let opacity = scheme == .dark ? 0.22 : 0.14
         return Color(hex: hex).opacity(opacity)
+    }
+
+    static func paneChrome(scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.black.opacity(0.25) : paper.opacity(0.72)
+    }
+
+    static func paperFill(scheme: ColorScheme) -> Color {
+#if os(macOS)
+        if scheme == .dark {
+            return Color(nsColor: .textBackgroundColor)
+        }
+#endif
+        return Color.white.opacity(0.92)
+    }
+}
+
+/// Soft capsule control — reading / compose toolbars.
+struct MuseCapsuleButtonStyle: ButtonStyle {
+    var prominent: Bool = false
+    var tint: Color = MuseTheme.leaf
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(prominent ? tint.opacity(configuration.isPressed ? 0.85 : 1.0)
+                          : MuseTheme.sage.opacity(configuration.isPressed ? 0.85 : 1.0))
+            )
+            .foregroundStyle(prominent ? Color.white : MuseTheme.ink)
+            .opacity(configuration.isPressed ? 0.92 : 1.0)
     }
 }
 

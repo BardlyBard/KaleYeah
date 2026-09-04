@@ -13,6 +13,10 @@ final class DemoMailStore: MailStore {
     var sort: MessageSort = .dateNewest
     var filter: MessageFilter = .all
     var searchText: String = ""
+    /// Stage-1 notification stub — focusAware / vipOnly / mute
+    var notificationPolicyRaw: String = "focusAware"
+    /// Soft muse chime when new mail arrives (default on).
+    var playSoundForNewMail: Bool = true
 
     private let archiveFolderID = UUID()
     private let trashFolderID = UUID()
@@ -215,6 +219,59 @@ final class DemoMailStore: MailStore {
             messages[i].flagID = nil
             messages[i].isFlagged = false
         }
+    }
+
+    /// Demo / Stage-1: insert an incoming message and apply notification policy (sound).
+    @discardableResult
+    func simulateNewMail() -> MailMessage {
+        let work = accounts.first { !$0.isCalliope } ?? accounts[0]
+        let inbox = folders.first { $0.kind == .inbox && $0.accountID == work.id }
+            ?? folders.first { $0.kind == .inbox }
+        let folderID = inbox?.id ?? UUID()
+        let subjects = [
+            ("Leaf Dispatch", "A soft ping from the packing floor — clipboard check when you can."),
+            ("Muse note", "Tiny reminder: the ridge loop still looks friendly this evening."),
+            ("Cold-chain chirp", "Humidity settled. No action needed — just a cheerful heads-up."),
+        ]
+        let pick = subjects.randomElement()!
+        let msg = MailMessage(
+            accountID: work.id,
+            folderID: folderID,
+            fromName: "RapSoDee Demo",
+            fromAddress: "demo@rapsodee.example",
+            toAddresses: [work.email],
+            subject: pick.0,
+            snippet: pick.1,
+            body: pick.1 + "\n\n— simulated new mail for Stage 1",
+            receivedAt: .now,
+            isRead: false,
+            deliveredTo: work.email
+        )
+        ingestIncoming(msg)
+        return msg
+    }
+
+    /// Insert an incoming message at the top and fire notification policy.
+    func ingestIncoming(_ message: MailMessage) {
+        messages.insert(message, at: 0)
+        applyNotificationPolicy(for: message)
+    }
+
+    /// NotificationPolicy stub: mute skips; vipOnly is reserved; otherwise play sound if enabled.
+    func applyNotificationPolicy(for message: MailMessage) {
+        switch notificationPolicyRaw {
+        case "mute":
+            return
+        case "vipOnly":
+            // VIP routing arrives later — Stage 1 treats simulate as audible when sound is on.
+            break
+        default:
+            break // focusAware
+        }
+        guard playSoundForNewMail else { return }
+        // Skip outbound/draft dispositions for safety if callers reuse ingest later.
+        if message.disposition == .pendingApproval { return }
+        MuseNewMailSound.play()
     }
 
     func sendCompose(_ draft: ComposeDraft) {

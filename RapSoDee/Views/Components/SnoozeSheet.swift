@@ -19,12 +19,17 @@ struct SnoozeSheet: View {
                     Button("Snooze until custom") {
                         onPick(customDate)
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
                 }
             }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .background(MuseTheme.paper.opacity(0.55))
             .navigationTitle("Snooze")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .buttonStyle(MuseCapsuleButtonStyle())
                 }
             }
         }

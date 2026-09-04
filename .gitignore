@@ -26,3 +26,6 @@ xcuserdata/
 
 # Built apps
 *.app/
+
+# Local build
+.derivedData/

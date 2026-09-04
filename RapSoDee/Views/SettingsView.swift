@@ -146,13 +146,27 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Notifications (stub)") {
+                Section("Notifications") {
+                    Toggle("Play sound for new mail", isOn: Bindable(store).playSoundForNewMail)
                     Picker("Policy", selection: $notificationPolicy) {
                         Text("Focus-aware").tag("focusAware")
                         Text("VIP only").tag("vipOnly")
                         Text("Mute").tag("mute")
                     }
-                    Text("Policy is persisted for Stage 1; delivery hooks come later.")
+                    .onChange(of: notificationPolicy) { _, value in
+                        store.notificationPolicyRaw = value
+                    }
+                    HStack(spacing: 10) {
+                        Button("Preview sound") {
+                            MuseNewMailSound.play()
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle())
+                        Button("Simulate new mail") {
+                            _ = store.simulateNewMail()
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
+                    }
+                    Text("Soft muse chime (~0.6s). Mute policy skips sound; VIP routing arrives later.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -164,6 +178,8 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .background(MuseTheme.paper.opacity(0.55))
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -171,10 +187,12 @@ struct SettingsView: View {
                         persistSettingsBlob()
                         dismiss()
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
                 }
             }
             .onAppear {
                 loadSettingsBlob()
+                notificationPolicy = store.notificationPolicyRaw
             }
         }
         .frame(minWidth: 560, minHeight: 480)
@@ -210,6 +228,7 @@ struct SettingsView: View {
         row.filterRaw = store.filter.rawValue
         row.vipAddressesCSV = vipText
         row.notificationPolicyRaw = notificationPolicy
+        row.playSoundForNewMail = store.playSoundForNewMail
         row.accountsJSON = try? JSONEncoder().encode(store.accounts)
         row.foldersJSON = try? JSONEncoder().encode(store.folders)
         try? modelContext.save()
@@ -223,6 +242,8 @@ struct SettingsView: View {
         if let filter = MessageFilter(rawValue: row.filterRaw) { store.filter = filter }
         vipText = row.vipAddressesCSV
         notificationPolicy = row.notificationPolicyRaw
+        store.notificationPolicyRaw = row.notificationPolicyRaw
+        store.playSoundForNewMail = row.playSoundForNewMail
         if let data = row.accountsJSON, let accounts = try? JSONDecoder().decode([MailAccount].self, from: data) {
             // Keep live message IDs; merge settings fields onto seeded accounts by email.
             for account in accounts {
