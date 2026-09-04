@@ -28,6 +28,7 @@ struct IMAPFetchedMessage {
     var body: String
     var isHTML: Bool
     var snippet: String
+    var rawAttachments: [ParsedMailAttachment]
     var isRead: Bool { flags.contains { $0.uppercased() == "\\SEEN" } }
     var isFlagged: Bool { flags.contains { $0.uppercased() == "\\FLAGGED" } }
 }
@@ -87,8 +88,9 @@ actor SimpleIMAPClient {
         guard exists > 0 else { return [] }
         let start = max(1, exists - limit + 1)
         let set = "\(start):\(exists)"
+        // BODYSTRUCTURE helps identify attachment parts; BODY[TEXT] carries multipart payloads we parse.
         let lines = try await taggedLines(
-            "FETCH \(set) (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT])",
+            "FETCH \(set) (UID FLAGS BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT])",
             allowLiterals: true
         )
         return parseFetch(lines)
@@ -228,7 +230,8 @@ actor SimpleIMAPClient {
                 date: date,
                 body: body,
                 isHTML: parsed.isHTML && !parsed.body.isEmpty,
-                snippet: snippet
+                snippet: snippet,
+                rawAttachments: parsed.attachments
             )
         }
         .sorted { $0.date > $1.date }

@@ -316,6 +316,30 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Display names") {
+                    if store.accounts.isEmpty {
+                        Text("Connect Gmail or Microsoft 365 to rename accounts and mailboxes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(store.accounts) { account in
+                        TextField("Account name", text: Binding(
+                            get: { account.name },
+                            set: { store.renameAccount(accountID: account.id, name: $0) }
+                        ))
+                        Text(account.email)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(store.folders.filter { $0.accountID == account.id }.sorted(by: { $0.sortOrder < $1.sortOrder })) { folder in
+                            TextField(folder.kind == .custom ? "Custom folder" : "Mailbox label", text: Binding(
+                                get: { store.displayName(for: folder) },
+                                set: { store.renameFolder(folderID: folder.id, name: $0) }
+                            ))
+                            .padding(.leading, 12)
+                        }
+                    }
+                }
+
                 Section("Unified Inbox — per-account toggles") {
                     ForEach(store.accounts) { account in
                         Toggle(isOn: Binding(
@@ -457,23 +481,17 @@ struct SettingsView: View {
                     .onChange(of: notificationPolicy) { _, value in
                         store.notificationPolicyRaw = value
                     }
-                    HStack(spacing: 10) {
-                        Button("Preview sound") {
-                            MuseNewMailSound.play()
-                        }
-                        .buttonStyle(MuseCapsuleButtonStyle())
-                        Button("Simulate new mail") {
-                            _ = store.simulateNewMail()
-                        }
-                        .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
+                    Button("Preview sound") {
+                        MuseNewMailSound.play()
                     }
+                    .buttonStyle(MuseCapsuleButtonStyle())
                     Text("Soft muse chime (~0.6s). Mute policy skips sound; VIP routing arrives later.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Section("Junk + Train (stub)") {
-                    Text("Mark as Junk and Train sender are wired as mailbox actions later. Demo Junk folder exists.")
+                    Text("Mark as Junk and Train sender are wired as mailbox actions later.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

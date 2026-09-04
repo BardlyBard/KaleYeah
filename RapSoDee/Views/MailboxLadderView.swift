@@ -7,6 +7,9 @@ struct MailboxLadderView: View {
 
     /// Per-account mailbox list expand state. Missing keys default to expanded.
     @State private var expandedByAccount: [UUID: Bool] = [:]
+    @State private var renameAccountTarget: MailAccount?
+    @State private var renameFolderTarget: MailFolder?
+    @State private var renameText = ""
 
     private static let expandDefaultsKey = "rapSoDee.accountMailboxExpanded"
 
@@ -88,6 +91,30 @@ struct MailboxLadderView: View {
         .onChange(of: selection) { _, _ in
             expandAccountsContainingSelection()
         }
+        .sheet(item: $renameAccountTarget) { account in
+            RenameSheet(
+                title: "Rename account",
+                prompt: "Display name",
+                text: $renameText
+            ) {
+                store.renameAccount(accountID: account.id, name: renameText)
+                renameAccountTarget = nil
+            } onCancel: {
+                renameAccountTarget = nil
+            }
+        }
+        .sheet(item: $renameFolderTarget) { folder in
+            RenameSheet(
+                title: "Rename mailbox",
+                prompt: "Display label",
+                text: $renameText
+            ) {
+                store.renameFolder(folderID: folder.id, name: renameText)
+                renameFolderTarget = nil
+            } onCancel: {
+                renameFolderTarget = nil
+            }
+        }
     }
 
     // MARK: - Account card (one soft tinted blob per account)
@@ -136,6 +163,12 @@ struct MailboxLadderView: View {
             }
             .buttonStyle(.plain)
             .help(expanded ? "Collapse mailboxes" : "Expand mailboxes")
+            .contextMenu {
+                Button("Rename Account…") {
+                    renameText = account.name
+                    renameAccountTarget = account
+                }
+            }
 
             if expanded {
                 ForEach(folders) { folder in
@@ -149,7 +182,7 @@ struct MailboxLadderView: View {
                                 .font(.body)
                                 .foregroundStyle(selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72))
                                 .frame(width: 18)
-                            Text(folder.name)
+                            Text(store.displayName(for: folder))
                                 .font(.body)
                                 .fontWeight(selected ? .semibold : .regular)
                                 .foregroundStyle(MuseTheme.ink)
@@ -171,6 +204,12 @@ struct MailboxLadderView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 6)
+                    .contextMenu {
+                        Button("Rename Mailbox…") {
+                            renameText = store.displayName(for: folder)
+                            renameFolderTarget = folder
+                        }
+                    }
                 }
             }
         }
@@ -309,5 +348,31 @@ struct MailboxLadderView: View {
         case .junk: return "xmark.bin"
         case .custom: return "folder"
         }
+    }
+}
+
+
+private struct RenameSheet: View {
+    let title: String
+    let prompt: String
+    @Binding var text: String
+    var onSave: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title).font(.headline)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                Button("Save") { onSave() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
     }
 }

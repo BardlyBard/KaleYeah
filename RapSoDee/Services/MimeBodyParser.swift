@@ -1,12 +1,19 @@
 import Foundation
 
+struct ParsedMailAttachment: Sendable {
+    var filename: String
+    var mimeType: String
+    var data: Data
+}
+
 struct ParsedMailBody: Sendable {
     var body: String
     var isHTML: Bool
     var snippet: String
+    var attachments: [ParsedMailAttachment]
 }
 
-/// Parses IMAP BODY[TEXT] (plus top-level Content-Type / CTE) into a displayable body.
+/// Parses IMAP BODY[TEXT] (plus top-level Content-Type / CTE) into a displayable body + attachments.
 enum MimeBodyParser {
     static func parse(
         textBody: String,
@@ -19,24 +26,27 @@ enum MimeBodyParser {
 
         if let boundary = boundaryParameter(from: typeHeader),
            typeHeader.lowercased().contains("multipart/") {
+            let attachments = collectAttachments(in: normalized, boundary: boundary)
             if let part = preferDisplayPart(in: normalized, boundary: boundary) {
-                return finalize(part.content, isHTML: part.isHTML)
+                return finalize(part.content, isHTML: part.isHTML, attachments: attachments)
             }
+            return finalize("", isHTML: false, attachments: attachments)
         }
 
         // BODY[TEXT] often includes multipart preamble + parts even when we missed Content-Type.
         if let sniffed = sniffMultipartAndPrefer(normalized) {
-            return finalize(sniffed.content, isHTML: sniffed.isHTML)
+            let attachments = sniffMultipartAttachments(normalized)
+            return finalize(sniffed.content, isHTML: sniffed.isHTML, attachments: attachments)
         }
 
         // Single-part: decode transfer encoding, then decide html vs plain from Content-Type.
         let decoded = decodeTransferEncoding(normalized, cte: cte)
         let isHTML = typeHeader.lowercased().contains("text/html") || looksLikeHTMLDocument(decoded)
         if isHTML {
-            return finalize(decoded, isHTML: true)
+            return finalize(decoded, isHTML: true, attachments: [])
         }
         let plain = stripMIMENoise(from: decoded)
-        return finalize(plain.isEmpty ? decoded : plain, isHTML: false)
+        return finalize(plain.isEmpty ? decoded : plain, isHTML: false, attachments: [])
     }
 
     static func makeSnippet(from body: String, isHTML: Bool) -> String {
@@ -75,11 +85,17 @@ enum MimeBodyParser {
     private struct MimePart {
         var contentType: String
         var transferEncoding: String?
+        var contentDisposition: String?
         var body: String
 
         var isHTML: Bool { contentType.lowercased().contains("text/html") }
         var isPlain: Bool { contentType.lowercased().contains("text/plain") }
         var isMultipart: Bool { contentType.lowercased().contains("multipart/") }
+
+        var filename: String? {
+            filenameParameter(from: contentDisposition)
+                ?? filenameParameter(from: contentType)
+        }
     }
 
     private struct DisplayPart {
@@ -165,7 +181,7 @@ enum MimeBodyParser {
             headerEnd = r.lowerBound
         } else {
             // No header/body split — treat entire chunk as body.
-            return MimePart(contentType: "text/plain", transferEncoding: nil, body: normalized)
+            return MimePart(contentType: "text/plain", transferEncoding: nil, contentDisposition: nil, body: normalized)
         }
         let headerBlob = String(normalized[..<headerEnd])
         var body = String(normalized[normalized.index(headerEnd, offsetBy: 2)...])
@@ -174,7 +190,141 @@ enum MimeBodyParser {
         let headers = parseHeaderBlock(headerBlob)
         let ct = headers["content-type"] ?? "text/plain"
         let cte = headers["content-transfer-encoding"]
-        return MimePart(contentType: ct, transferEncoding: cte, body: body)
+        let cd = headers["content-disposition"]
+        return MimePart(contentType: ct, transferEncoding: cte, contentDisposition: cd, body: body)
+    }
+
+    private static func collectAttachments(in text: String, boundary: String) -> [ParsedMailAttachment] {
+        var out: [ParsedMailAttachment] = []
+        for raw in splitMultipart(text, boundary: boundary) {
+            guard let part = parseOnePart(raw) else { continue }
+            if part.isMultipart, let nested = boundaryParameter(from: part.contentType) {
+                out.append(contentsOf: collectAttachments(in: part.body, boundary: nested))
+                continue
+            }
+            if let att = attachmentFromPart(part) {
+                out.append(att)
+            }
+        }
+        return out
+    }
+
+    private static func sniffMultipartAttachments(_ text: String) -> [ParsedMailAttachment] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var counts: [String: Int] = [:]
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard t.hasPrefix("--"), t.count >= 4, t.count < 80 else { continue }
+            if t == "--" { continue }
+            let key = t.hasSuffix("--") ? String(t.dropLast(2)) : t
+            guard key.hasPrefix("--") else { continue }
+            counts[key, default: 0] += 1
+        }
+        let candidates = counts.filter { $0.value >= 2 }.map(\.key).sorted { $0.count > $1.count }
+        for marker in candidates {
+            let boundary = String(marker.dropFirst(2))
+            let found = collectAttachments(in: text, boundary: boundary)
+            if !found.isEmpty { return found }
+        }
+        return []
+    }
+
+    private static func attachmentFromPart(_ part: MimePart) -> ParsedMailAttachment? {
+        guard !part.isMultipart else { return nil }
+        let disp = (part.contentDisposition ?? "").lowercased()
+        let ct = part.contentType.lowercased()
+        let looksBinary = ct.hasPrefix("application/")
+            || ct.hasPrefix("image/")
+            || ct.hasPrefix("audio/")
+            || ct.hasPrefix("video/")
+            || ct.contains("octet-stream")
+        let named = part.filename != nil
+        let isAttachDisp = disp.contains("attachment")
+        let isInlineNamedBinary = disp.contains("inline") && named && !part.isPlain && !part.isHTML
+        let isNamedNonText = named && !part.isPlain && !part.isHTML
+        guard isAttachDisp || isInlineNamedBinary || isNamedNonText || (looksBinary && !part.isPlain && !part.isHTML) else {
+            return nil
+        }
+        // Prefer body display parts over treating them as attachments.
+        if (part.isPlain || part.isHTML) && !isAttachDisp { return nil }
+
+        let data = decodeTransferEncodingData(part.body, cte: part.transferEncoding)
+        guard !data.isEmpty else { return nil }
+        let trimmedName = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let filename = trimmedName.isEmpty ? defaultFilename(for: part.contentType) : trimmedName
+        let mime = part.contentType.split(separator: ";").first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "application/octet-stream"
+        return ParsedMailAttachment(filename: filename, mimeType: mime, data: data)
+    }
+
+    private static func defaultFilename(for contentType: String) -> String {
+        let ct = contentType.lowercased()
+        if ct.hasPrefix("image/png") { return "image.png" }
+        if ct.hasPrefix("image/jpeg") || ct.hasPrefix("image/jpg") { return "image.jpg" }
+        if ct.hasPrefix("image/gif") { return "image.gif" }
+        if ct.hasPrefix("image/webp") { return "image.webp" }
+        if ct.contains("pdf") { return "document.pdf" }
+        return "attachment.bin"
+    }
+
+    private static func filenameParameter(from header: String?) -> String? {
+        guard let header, !header.isEmpty else { return nil }
+        let pattern = #"(?:filename\*|filename)\s*=\s*(?:\"([^\"]+)\"|([^;\s]+))"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(header.startIndex..., in: header)
+        guard let match = regex.firstMatch(in: header, options: [], range: range) else { return nil }
+        for i in 1..<match.numberOfRanges {
+            if let r = Range(match.range(at: i), in: header) {
+                var value = String(header[r]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                if value.lowercased().hasPrefix("utf-8''") {
+                    value = String(value.dropFirst(7))
+                    value = value.removingPercentEncoding ?? value
+                }
+                if !value.isEmpty { return decodeMIMEWord(value) }
+            }
+        }
+        return nil
+    }
+
+    private static func decodeMIMEWord(_ value: String) -> String {
+        // Lightweight =?UTF-8?B?...?= / Q decode for filenames.
+        let pattern = #"=\?([^?]+)\?([bBqQ])\?([^?]*)\?="#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
+        let range = NSRange(value.startIndex..., in: value)
+        var result = value
+        let matches = regex.matches(in: value, options: [], range: range).reversed()
+        for match in matches {
+            guard match.numberOfRanges >= 4,
+                  let encR = Range(match.range(at: 2), in: value),
+                  let payR = Range(match.range(at: 3), in: value),
+                  let full = Range(match.range(at: 0), in: result) else { continue }
+            let encoding = String(value[encR]).uppercased()
+            let payload = String(value[payR])
+            let data: Data?
+            if encoding == "B" {
+                data = Data(base64Encoded: payload)
+            } else {
+                data = decodeQuotedPrintable(payload.replacingOccurrences(of: "_", with: " ")).data(using: .utf8)
+            }
+            if let data, let decoded = String(data: data, encoding: .utf8) {
+                result.replaceSubrange(full, with: decoded)
+            }
+        }
+        return result
+    }
+
+    private static func decodeTransferEncodingData(_ body: String, cte: String?) -> Data {
+        let encoding = (cte ?? "").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if encoding.contains("base64") {
+            let cleaned = body.components(separatedBy: .whitespacesAndNewlines).joined()
+            if let data = Data(base64Encoded: cleaned, options: [.ignoreUnknownCharacters]) {
+                return data
+            }
+        }
+        if encoding.contains("quoted-printable") {
+            return Data(decodeQuotedPrintable(body).utf8)
+        }
+        return Data(body.utf8)
     }
 
     private static func parseHeaderBlock(_ raw: String) -> [String: String] {
@@ -277,13 +427,14 @@ enum MimeBodyParser {
 
     // MARK: - Cleanup / snippet helpers
 
-    private static func finalize(_ body: String, isHTML: Bool) -> ParsedMailBody {
+    private static func finalize(_ body: String, isHTML: Bool, attachments: [ParsedMailAttachment] = []) -> ParsedMailBody {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         let safe = trimmed.isEmpty ? "" : trimmed
         return ParsedMailBody(
             body: safe,
             isHTML: isHTML && !safe.isEmpty,
-            snippet: makeSnippet(from: safe, isHTML: isHTML && !safe.isEmpty)
+            snippet: makeSnippet(from: safe, isHTML: isHTML && !safe.isEmpty),
+            attachments: attachments
         )
     }
 
@@ -337,5 +488,13 @@ enum MimeBodyParser {
         s = s.replacingOccurrences(of: #"&#(\d+);"#, with: " ", options: .regularExpression)
         s = s.replacingOccurrences(of: #"&[a-zA-Z]+;"#, with: " ", options: .regularExpression)
         return s
+    }
+}
+
+
+private extension String {
+    var nilIfEmpty: String? {
+        let t = trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 }

@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct ComposeView: View {
     @Environment(DemoMailStore.self) private var store
@@ -13,6 +15,11 @@ struct ComposeView: View {
     var body: some View {
         VStack(spacing: 0) {
             form
+            if !draft.attachments.isEmpty {
+                attachmentChips
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
             Divider().opacity(0.4)
             TextEditor(text: $draft.body)
                 .font(.body)
@@ -26,6 +33,14 @@ struct ComposeView: View {
                 .padding(.vertical, 10)
             Divider().opacity(0.4)
             HStack(spacing: 10) {
+                Button {
+                    attachFiles()
+                } label: {
+                    Label("Attach", systemImage: "paperclip")
+                }
+                .buttonStyle(MuseCapsuleButtonStyle())
+                .help("Attach files")
+
                 if !isPopOut, let onPopOut {
                     Button("Pop Out") {
                         onPopOut(draft)
@@ -59,6 +74,7 @@ struct ComposeView: View {
                         close()
                     }
                     .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.leaf))
+                    .disabled(store.accounts.isEmpty)
                 }
             }
             .padding(12)
@@ -101,6 +117,66 @@ struct ComposeView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .frame(maxHeight: 200)
+    }
+
+    private var attachmentChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(draft.attachments) { att in
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc")
+                            .foregroundStyle(MuseTheme.leaf)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(att.filename)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(att.byteSize), countStyle: .file))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            draft.attachments.removeAll { $0.id == att.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove attachment")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Color.secondary.opacity(0.10),
+                        in: Capsule()
+                    )
+                }
+            }
+        }
+    }
+
+    private func attachFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.item]
+        panel.message = "Choose files to attach"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            do {
+                let imported = try AttachmentStore.importUserFile(from: url)
+                draft.attachments.append(
+                    ComposeAttachment(
+                        filename: imported.filename,
+                        mimeType: imported.mimeType,
+                        byteSize: imported.byteSize,
+                        localPath: imported.path
+                    )
+                )
+            } catch {
+                // Skip unreadable files silently; no content logging.
+            }
+        }
     }
 
     private func close() {

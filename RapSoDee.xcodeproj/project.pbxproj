@@ -24,6 +24,7 @@
 		84749A185DB597F106310035 /* DemoMailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */; };
 		85A9A046D31C0C329CD61E35 /* ReadingPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */; };
 		883A753B7BD8710AB97E42AD /* HTMLMailWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1282089DC42D88ED01B5C74 /* HTMLMailWebView.swift */; };
+		923D987E8081AD1B5694B9CC /* AttachmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD842DE4FE5AE47AC915034 /* AttachmentStore.swift */; };
 		9747425BBC2BCB2BF0E1488A /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = 1D7A8B60201D7BD9EAD048A6 /* Sounds */; };
 		99040D356EC8DD63B1E52697 /* MacSecureField.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD343817DC7561DB08A98E3 /* MacSecureField.swift */; };
 		A06737250A686C19726910AC /* RapSoDeeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */; };
@@ -35,6 +36,7 @@
 		DD7F161189C64E89C0E6CC78 /* SnoozeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */; };
 		E12CD9618BE2AC560961F7EB /* MailStartTLSConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1512F3CAC81FA77F64B5F712 /* MailStartTLSConnection.swift */; };
 		E780B3DD20B3DF5B1CF9A77A /* MimeBodyParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 065C4804F8541313AE03AE2F /* MimeBodyParser.swift */; };
+		E8609093D92258F7B83F2C93 /* MailDisplayNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */; };
 		E8F5DADC465A66968CA67CBD /* IMAPAccountSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684D7DD0B3944251C3A03C0B /* IMAPAccountSyncService.swift */; };
 		EB108FA3EF5262901A68D864 /* KeychainCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D824C655A6789480B722FF9 /* KeychainCredentialStore.swift */; };
 		EC4E203ACF0DB47B239085C2 /* MessageListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */; };
@@ -65,12 +67,14 @@
 		7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeView.swift; sourceTree = "<group>"; };
 		7EFBCCB2127B4E1CE2B7084B /* MailTLSConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailTLSConnection.swift; sourceTree = "<group>"; };
 		8B5DF663D1DAB5115A266044 /* MuseTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MuseTheme.swift; sourceTree = "<group>"; };
+		9AD842DE4FE5AE47AC915034 /* AttachmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStore.swift; sourceTree = "<group>"; };
 		9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
 		A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RapSoDeeApp.swift; sourceTree = "<group>"; };
 		A4605E49DCDE9B499093CE4D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A5B620B26A6A368F2BD1812A /* MuseNewMailSound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MuseNewMailSound.swift; sourceTree = "<group>"; };
 		B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModels.swift; sourceTree = "<group>"; };
 		B384989846962FDE099FEC67 /* RapSoDee.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RapSoDee.entitlements; sourceTree = "<group>"; };
+		BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailDisplayNames.swift; sourceTree = "<group>"; };
 		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
 		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleIMAPClient.swift; sourceTree = "<group>"; };
@@ -189,9 +193,11 @@
 		F7FECC30E86617ADCB4F5899 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				9AD842DE4FE5AE47AC915034 /* AttachmentStore.swift */,
 				2EB951F80DA297C00D44E728 /* GmailSyncService.swift */,
 				684D7DD0B3944251C3A03C0B /* IMAPAccountSyncService.swift */,
 				2D824C655A6789480B722FF9 /* KeychainCredentialStore.swift */,
+				BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */,
 				45C740C8BCBCDCB3368CEA56 /* MailIMAPProvider.swift */,
 				1512F3CAC81FA77F64B5F712 /* MailStartTLSConnection.swift */,
 				7EFBCCB2127B4E1CE2B7084B /* MailTLSConnection.swift */,
@@ -282,6 +288,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				923D987E8081AD1B5694B9CC /* AttachmentStore.swift in Sources */,
 				068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */,
 				CD80E90A36403943257098A6 /* ContentView.swift in Sources */,
 				84749A185DB597F106310035 /* DemoMailStore.swift in Sources */,
@@ -294,6 +301,7 @@
 				EB108FA3EF5262901A68D864 /* KeychainCredentialStore.swift in Sources */,
 				652C516C3580100CDF36E4FA /* MSALAuthService.swift in Sources */,
 				99040D356EC8DD63B1E52697 /* MacSecureField.swift in Sources */,
+				E8609093D92258F7B83F2C93 /* MailDisplayNames.swift in Sources */,
 				7C8893389E67FBB0273E9BCB /* MailIMAPProvider.swift in Sources */,
 				557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */,
 				E12CD9618BE2AC560961F7EB /* MailStartTLSConnection.swift in Sources */,

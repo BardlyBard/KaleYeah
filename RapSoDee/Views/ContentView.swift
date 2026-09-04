@@ -62,6 +62,14 @@ struct ContentView: View {
             hydrateFlagsIfNeeded()
             Task { await store.bootstrapLiveAccountsOnLaunch() }
         }
+        .task {
+            // Auto-sync every 5 minutes while the window is open; skip if a sync is already running.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                guard !Task.isCancelled else { break }
+                await store.syncAllConnectedAccounts()
+            }
+        }
         .overlay(alignment: .top) {
             if store.gmailNeedsSetup && !dismissGmailPrompt {
                 HStack(spacing: 12) {
@@ -70,7 +78,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Connect Gmail")
                             .font(.headline)
-                        Text("Paste a Google App Password in Settings → Accounts for \(GmailDefaults.defaultEmail). Demo mail stays available.")
+                        Text("Paste a Google App Password in Settings → Accounts for \(GmailDefaults.defaultEmail).")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -124,7 +132,7 @@ struct ContentView: View {
             ContentUnavailableView(
                 "Pick a leaf",
                 systemImage: "envelope.open",
-                description: Text("Choose a message from the list — inbox is your working set.")
+                description: Text(store.accounts.isEmpty ? "Connect Gmail or Microsoft 365 in Settings to get started." : "Choose a message from the list — inbox is your working set.")
             )
             .padding(MuseTheme.paneInset)
             .background(MuseTheme.paper.opacity(0.55))
@@ -135,11 +143,26 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
+                Task { await store.syncAllConnectedAccounts() }
+            } label: {
+                if store.isAnyLiveSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 16, height: 16)
+                } else {
+                    Label("Sync all", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+            .help("Sync Gmail and Microsoft 365")
+            .disabled(store.isAnyLiveSyncing)
+
+            Button {
                 startCompose(.new)
             } label: {
                 Label("New Message", systemImage: "square.and.pencil")
             }
             .help("New Message")
+            .disabled(store.accounts.isEmpty)
 
             FlagToolbarMenu(
                 flags: store.flags,
@@ -170,10 +193,20 @@ struct ContentView: View {
     private func makeDraft(_ mode: ComposeMode) -> ComposeDraft {
         switch mode {
         case .new:
-            let account = store.gmailAccount()
+            guard let account = store.gmailAccount()
                 ?? store.office365Account()
-                ?? store.accounts.first { !$0.isCalliope }
-                ?? store.accounts[0]
+                ?? store.accounts.first(where: { !$0.isCalliope })
+                ?? store.accounts.first else {
+                return ComposeDraft(
+                    mode: .new,
+                    fromAddress: "",
+                    to: "",
+                    cc: "",
+                    subject: "",
+                    body: "",
+                    accountID: UUID()
+                )
+            }
             let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
             return ComposeDraft(
                 mode: .new,
@@ -185,7 +218,7 @@ struct ContentView: View {
                 accountID: account.id
             )
         case .reply(let message):
-            let account = store.account(for: message.accountID) ?? store.accounts[0]
+            let account = store.account(for: message.accountID) ?? store.accounts.first!
             let from = message.deliveredTo
             let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
             return ComposeDraft(
@@ -200,7 +233,7 @@ struct ContentView: View {
                 accountID: accountForDelivery(from) ?? message.accountID
             )
         case .replyAll(let message):
-            let account = store.account(for: message.accountID) ?? store.accounts[0]
+            let account = store.account(for: message.accountID) ?? store.accounts.first!
             let from = message.deliveredTo
             var recipients = ([message.fromAddress] + message.toAddresses + message.ccAddresses)
                 .filter { $0.lowercased() != from.lowercased() }

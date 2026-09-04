@@ -95,17 +95,33 @@ enum MicrosoftGraphMailService {
         let cc = draft.cc.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
 
+        var messageObj: [String: Any] = [
+            "subject": draft.subject,
+            "body": [
+                "contentType": "Text",
+                "content": bodyText,
+            ],
+            "toRecipients": to.map { ["emailAddress": ["address": $0]] },
+            "ccRecipients": cc.map { ["emailAddress": ["address": $0]] },
+            "from": ["emailAddress": ["address": fromEmail]],
+        ]
+        if !draft.attachments.isEmpty {
+            var graphAttachments: [[String: Any]] = []
+            for att in draft.attachments {
+                guard let data = AttachmentStore.load(path: att.localPath) else { continue }
+                graphAttachments.append([
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": att.filename,
+                    "contentType": att.mimeType,
+                    "contentBytes": data.base64EncodedString(),
+                ])
+            }
+            if !graphAttachments.isEmpty {
+                messageObj["attachments"] = graphAttachments
+            }
+        }
         let payload: [String: Any] = [
-            "message": [
-                "subject": draft.subject,
-                "body": [
-                    "contentType": "Text",
-                    "content": bodyText,
-                ],
-                "toRecipients": to.map { ["emailAddress": ["address": $0]] },
-                "ccRecipients": cc.map { ["emailAddress": ["address": $0]] },
-                "from": ["emailAddress": ["address": fromEmail]],
-            ] as [String: Any],
+            "message": messageObj,
             "saveToSentItems": true,
         ]
 
@@ -137,16 +153,72 @@ enum MicrosoftGraphMailService {
             ]
         )
 
-        return (list.value ?? []).map { gm in
-            mapMessage(
-                gm,
-                accountID: accountID,
-                folderID: folderID,
-                accountEmail: accountEmail,
-                mailboxKey: mailboxKey,
-                isDraft: isDraft
+        var out: [MailMessage] = []
+        for gm in list.value ?? [] {
+            let id = stableMessageID(email: accountEmail, mailbox: mailboxKey, graphID: gm.id ?? UUID().uuidString)
+            var attachments: [MailAttachment] = []
+            if gm.hasAttachments == true, let graphID = gm.id {
+                attachments = try await fetchFileAttachments(
+                    messageGraphID: graphID,
+                    accessToken: accessToken,
+                    mailMessageID: id
+                )
+            }
+            out.append(
+                mapMessage(
+                    gm,
+                    accountID: accountID,
+                    folderID: folderID,
+                    accountEmail: accountEmail,
+                    mailboxKey: mailboxKey,
+                    isDraft: isDraft,
+                    messageID: id,
+                    attachments: attachments
+                )
             )
         }
+        return out
+    }
+
+    private static func fetchFileAttachments(
+        messageGraphID: String,
+        accessToken: String,
+        mailMessageID: UUID
+    ) async throws -> [MailAttachment] {
+        struct GraphAttachmentList: Decodable {
+            var value: [GraphAttachment]?
+        }
+        let encodedID = messageGraphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? messageGraphID
+        let list: GraphAttachmentList = try await getJSON(
+            path: "/me/messages/\(encodedID)/attachments",
+            accessToken: accessToken,
+            query: [:]
+        )
+        var result: [MailAttachment] = []
+        for item in list.value ?? [] {
+            let typeName = (item.odataType ?? "").lowercased()
+            guard typeName.contains("fileattachment") else { continue }
+            let filename = (item.name ?? "attachment").trimmingCharacters(in: .whitespacesAndNewlines)
+            let mime = item.contentType ?? AttachmentStore.mimeType(forFilename: filename)
+            var localPath: String? = nil
+            var byteSize = item.size ?? 0
+            if let b64 = item.contentBytes, !b64.isEmpty,
+               let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) {
+                byteSize = data.count
+                localPath = try? AttachmentStore.save(data: data, filename: filename, messageID: mailMessageID)
+            }
+            result.append(
+                MailAttachment(
+                    id: UUID(),
+                    filename: filename.isEmpty ? "attachment" : filename,
+                    mimeType: mime,
+                    byteSize: byteSize,
+                    localPath: localPath,
+                    remoteID: item.id
+                )
+            )
+        }
+        return result
     }
 
     private static func mapMessage(
@@ -155,7 +227,9 @@ enum MicrosoftGraphMailService {
         folderID: UUID,
         accountEmail: String,
         mailboxKey: String,
-        isDraft: Bool
+        isDraft: Bool,
+        messageID: UUID,
+        attachments: [MailAttachment]
     ) -> MailMessage {
         let fromAddr = gm.from?.emailAddress?.address ?? ""
         let fromName = gm.from?.emailAddress?.name ?? fromAddr
@@ -170,10 +244,9 @@ enum MicrosoftGraphMailService {
             ?? gm.sentDateTime.flatMap(parseGraphDate)
             ?? Date()
         let flagged = (gm.flag?.flagStatus ?? "").lowercased() == "flagged"
-        let id = stableMessageID(email: accountEmail, mailbox: mailboxKey, graphID: gm.id ?? UUID().uuidString)
 
         return MailMessage(
-            id: id,
+            id: messageID,
             accountID: accountID,
             folderID: folderID,
             fromName: fromName,
@@ -187,6 +260,7 @@ enum MicrosoftGraphMailService {
             receivedAt: date,
             isRead: gm.isRead ?? false,
             isFlagged: flagged,
+            attachments: attachments,
             deliveredTo: accountEmail,
             disposition: .normal,
             isDraft: isDraft
@@ -317,6 +391,20 @@ private struct GraphMessage: Decodable {
     var isRead: Bool?
     var flag: GraphFlag?
     var hasAttachments: Bool?
+}
+
+private struct GraphAttachment: Decodable {
+    var id: String?
+    var name: String?
+    var contentType: String?
+    var size: Int?
+    var contentBytes: String?
+    var odataType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, contentType, size, contentBytes
+        case odataType = "@odata.type"
+    }
 }
 
 private struct GraphBody: Decodable {

@@ -50,12 +50,19 @@ actor SimpleSMTPClient {
         guard auth.code == 235 else { throw MailNetError.authFailed(auth.raw) }
     }
 
+    struct OutboundAttachment: Sendable {
+        var filename: String
+        var mimeType: String
+        var data: Data
+    }
+
     func send(
         from: String,
         to: [String],
         cc: [String] = [],
         subject: String,
-        body: String
+        body: String,
+        attachments: [OutboundAttachment] = []
     ) async throws {
         guard backend != nil else { throw MailNetError.unexpected("Not connected") }
         let recipients = (to + cc).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -83,11 +90,43 @@ actor SimpleSMTPClient {
         }
         message += "Subject: \(subject)\r\n"
         message += "MIME-Version: 1.0\r\n"
-        message += "Content-Type: text/plain; charset=utf-8\r\n"
-        message += "Content-Transfer-Encoding: 8bit\r\n"
         message += "Date: \(rfc2822Now())\r\n"
-        message += "\r\n"
-        let stuffed = body
+
+        if attachments.isEmpty {
+            message += "Content-Type: text/plain; charset=utf-8\r\n"
+            message += "Content-Transfer-Encoding: 8bit\r\n"
+            message += "\r\n"
+            message += dotStuff(body)
+        } else {
+            let boundary = "rapsodee_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            message += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\r\n"
+            message += "\r\n"
+            message += "--\(boundary)\r\n"
+            message += "Content-Type: text/plain; charset=utf-8\r\n"
+            message += "Content-Transfer-Encoding: 8bit\r\n"
+            message += "\r\n"
+            message += dotStuff(body)
+            message += "\r\n"
+            for att in attachments {
+                let safeName = att.filename.replacingOccurrences(of: "\"", with: "")
+                message += "--\(boundary)\r\n"
+                message += "Content-Type: \(att.mimeType); name=\"\(safeName)\"\r\n"
+                message += "Content-Disposition: attachment; filename=\"\(safeName)\"\r\n"
+                message += "Content-Transfer-Encoding: base64\r\n"
+                message += "\r\n"
+                message += base64Wrapped(att.data)
+                message += "\r\n"
+            }
+            message += "--\(boundary)--\r\n"
+        }
+        message += ".\r\n"
+        try await sendData(Data(message.utf8))
+        let done = try await readResponse()
+        guard done.code == 250 else { throw MailNetError.smtpFailed(done.raw) }
+    }
+
+    private func dotStuff(_ body: String) -> String {
+        body
             .replacingOccurrences(of: "\r\n", with: "\n")
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { line -> String in
@@ -95,11 +134,18 @@ actor SimpleSMTPClient {
                 return s.hasPrefix(".") ? "." + s : s
             }
             .joined(separator: "\r\n")
-        message += stuffed
-        message += "\r\n.\r\n"
-        try await sendData(Data(message.utf8))
-        let done = try await readResponse()
-        guard done.code == 250 else { throw MailNetError.smtpFailed(done.raw) }
+    }
+
+    private func base64Wrapped(_ data: Data) -> String {
+        let b64 = data.base64EncodedString()
+        var lines: [String] = []
+        var idx = b64.startIndex
+        while idx < b64.endIndex {
+            let end = b64.index(idx, offsetBy: 76, limitedBy: b64.endIndex) ?? b64.endIndex
+            lines.append(String(b64[idx..<end]))
+            idx = end
+        }
+        return lines.joined(separator: "\r\n")
     }
 
     func quit() async {

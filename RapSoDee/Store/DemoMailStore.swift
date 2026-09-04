@@ -31,8 +31,17 @@ final class DemoMailStore: MailStore {
     var office365SyncStartedAt: Date?
     var office365NeedsSetup: Bool = true
     var office365LastError: String?
-    /// Overall Graph sync budget (token + inbox + sent).
-    private static let office365SyncTimeoutSeconds: TimeInterval = 55
+    /// Overall Graph sync budget (token + inbox + sent + attachments).
+    private static let office365SyncTimeoutSeconds: TimeInterval = 90
+
+    /// Universal toolbar sync busy (Gmail + M365).
+    var isUniversalSyncing: Bool = false
+    /// Prevent overlapping Sync all / auto-sync runs.
+    private var syncAllInFlight: Bool = false
+
+    var isAnyLiveSyncing: Bool {
+        isUniversalSyncing || gmailIsSyncing || office365IsSyncing
+    }
 
     private let archiveFolderID = UUID()
     private let trashFolderID = UUID()
@@ -216,6 +225,40 @@ final class DemoMailStore: MailStore {
         accounts[i].tintHex = hex
     }
 
+    func renameAccount(accountID: UUID, name: String) {
+        guard let i = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        accounts[i].name = trimmed
+        MailDisplayNames.setAccountName(trimmed, for: accountID)
+    }
+
+    func renameFolder(folderID: UUID, name: String) {
+        guard let i = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        folders[i].name = trimmed
+        MailDisplayNames.setFolderName(trimmed, for: folderID)
+    }
+
+    func displayName(for folder: MailFolder) -> String {
+        MailDisplayNames.folderName(for: folder.id) ?? folder.name
+    }
+
+    private func applyPersistedDisplayNames() {
+        for i in accounts.indices {
+            if let override = MailDisplayNames.accountName(for: accounts[i].id) {
+                accounts[i].name = override
+            }
+        }
+        for i in folders.indices {
+            if let override = MailDisplayNames.folderName(for: folders[i].id) {
+                folders[i].name = override
+            }
+        }
+    }
+
+
     func upsertFlag(_ flag: MailFlag) {
         if let i = flags.firstIndex(where: { $0.id == flag.id }) {
             flags[i] = flag
@@ -242,36 +285,6 @@ final class DemoMailStore: MailStore {
             messages[i].flagID = nil
             messages[i].isFlagged = false
         }
-    }
-
-    /// Demo / Stage-1: insert an incoming message and apply notification policy (sound).
-    @discardableResult
-    func simulateNewMail() -> MailMessage {
-        let work = accounts.first { !$0.isCalliope } ?? accounts[0]
-        let inbox = folders.first { $0.kind == .inbox && $0.accountID == work.id }
-            ?? folders.first { $0.kind == .inbox }
-        let folderID = inbox?.id ?? UUID()
-        let subjects = [
-            ("Leaf Dispatch", "A soft ping from the packing floor — clipboard check when you can."),
-            ("Muse note", "Tiny reminder: the ridge loop still looks friendly this evening."),
-            ("Cold-chain chirp", "Humidity settled. No action needed — just a cheerful heads-up."),
-        ]
-        let pick = subjects.randomElement()!
-        let msg = MailMessage(
-            accountID: work.id,
-            folderID: folderID,
-            fromName: "RapSoDee Demo",
-            fromAddress: "demo@rapsodee.example",
-            toAddresses: [work.email],
-            subject: pick.0,
-            snippet: pick.1,
-            body: pick.1 + "\n\n— simulated new mail for Stage 1",
-            receivedAt: .now,
-            isRead: false,
-            deliveredTo: work.email
-        )
-        ingestIncoming(msg)
-        return msg
     }
 
     /// Insert an incoming message at the top and fire notification policy.
@@ -319,6 +332,15 @@ final class DemoMailStore: MailStore {
         } else {
             bodyWithSig = draft.body
         }
+        let attachments = draft.attachments.map {
+            MailAttachment(
+                id: $0.id,
+                filename: $0.filename,
+                mimeType: $0.mimeType,
+                byteSize: $0.byteSize,
+                localPath: $0.localPath
+            )
+        }
         let msg = MailMessage(
             accountID: draft.accountID,
             folderID: folderID,
@@ -331,6 +353,7 @@ final class DemoMailStore: MailStore {
             body: bodyWithSig,
             receivedAt: .now,
             isRead: true,
+            attachments: attachments,
             deliveredTo: draft.fromAddress,
             disposition: .normal,
             isDraft: false
@@ -350,11 +373,11 @@ final class DemoMailStore: MailStore {
             messages[i].folderID = approveID
             messages[i].isDraft = true
         } else {
-            let account = accounts.first { $0.isCalliope } ?? accounts.first!
+            guard let account = accounts.first(where: { !$0.isCalliope }) ?? accounts.first else { return }
             let msg = MailMessage(
                 accountID: account.id,
                 folderID: approveID,
-                fromName: "Calliope",
+                fromName: account.name,
                 fromAddress: account.email,
                 toAddresses: draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) },
                 ccAddresses: draft.cc.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
@@ -428,7 +451,11 @@ final class DemoMailStore: MailStore {
         if let existing = gmailAccount() {
             if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
                 accounts[i].email = email
-                accounts[i].name = "Gmail"
+                if let override = MailDisplayNames.accountName(for: existing.id) {
+                    accounts[i].name = override
+                } else if accounts[i].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    accounts[i].name = "Gmail"
+                }
             }
             GmailSyncService.rememberAccount(email: email, id: existing.id)
             return accounts.first { $0.isLiveGmail }!
@@ -457,7 +484,8 @@ final class DemoMailStore: MailStore {
         let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
         folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
         GmailSyncService.rememberAccount(email: email, id: id)
-        return account
+        applyPersistedDisplayNames()
+        return accounts.first { $0.id == id } ?? account
     }
 
     func removeGmailAccount() {
@@ -471,7 +499,7 @@ final class DemoMailStore: MailStore {
             accounts[idx].sortOrder = idx
         }
         gmailNeedsSetup = true
-        gmailSyncStatus = "Gmail account removed — demo mail still available."
+        gmailSyncStatus = "Gmail account removed."
         gmailLastError = nil
     }
 
@@ -581,18 +609,42 @@ final class DemoMailStore: MailStore {
         await bootstrapLiveAccountsOnLaunch()
     }
 
+    /// Sync every connected live account. Skips if a sync is already running.
+    func syncAllConnectedAccounts() async {
+        if syncAllInFlight || gmailIsSyncing || office365IsSyncing { return }
+        let hasGmail = gmailAccount().map { KeychainCredentialStore.hasCredentials(forEmail: $0.email) } ?? false
+        await MSALAuthService.shared.refreshSignedInStateFromCache()
+        let msalSignedIn = await MainActor.run { MSALAuthService.shared.isSignedIn }
+        let hasOffice = msalSignedIn || MSALAppConfig.rememberedSignedInEmail != nil || office365Account() != nil
+        guard hasGmail || hasOffice else { return }
+
+        syncAllInFlight = true
+        isUniversalSyncing = true
+        defer {
+            syncAllInFlight = false
+            isUniversalSyncing = false
+        }
+        if hasGmail {
+            await syncGmailNow()
+        }
+        if hasOffice {
+            await syncOffice365Now()
+        }
+    }
+
     func bootstrapLiveAccountsOnLaunch() async {
         office365IsSyncing = false
         office365SyncStartedAt = nil
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
+        applyPersistedDisplayNames()
         if let account = gmailAccount(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
             gmailNeedsSetup = false
             await syncGmailNow()
         } else {
             gmailNeedsSetup = true
             if gmailSyncStatus.isEmpty {
-                gmailSyncStatus = "Demo accounts ready. Add Gmail App Password in Settings → Accounts."
+                gmailSyncStatus = "Add Gmail App Password in Settings → Accounts."
             }
         }
         await MSALAuthService.shared.refreshSignedInStateFromCache()
@@ -673,7 +725,11 @@ final class DemoMailStore: MailStore {
         if let existing = office365Account() {
             if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
                 accounts[i].email = email
-                accounts[i].name = "Microsoft 365"
+                if let override = MailDisplayNames.accountName(for: existing.id) {
+                    accounts[i].name = override
+                } else if accounts[i].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    accounts[i].name = "Microsoft 365"
+                }
                 accounts[i].tintHex = accounts[i].tintHex.isEmpty ? Office365Defaults.tintHex : accounts[i].tintHex
             }
             Office365SyncService.rememberAccount(email: email, id: existing.id)
@@ -708,7 +764,8 @@ final class DemoMailStore: MailStore {
         let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
         folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
         Office365SyncService.rememberAccount(email: email, id: id)
-        return account
+        applyPersistedDisplayNames()
+        return accounts.first { $0.id == id } ?? account
     }
 
     func removeOffice365Account() {
@@ -727,7 +784,7 @@ final class DemoMailStore: MailStore {
         }
         Task { @MainActor in await MSALAuthService.shared.signOut() }
         office365NeedsSetup = true
-        office365SyncStatus = "Signed out of Microsoft 365 — Gmail and demo mail still available."
+        office365SyncStatus = "Signed out of Microsoft 365."
         office365LastError = nil
     }
 
@@ -998,234 +1055,20 @@ final class DemoMailStore: MailStore {
 
     // MARK: - Seed
 
+    /// No demo accounts or sample messages — only shared smart folders.
+    /// Live Gmail / Microsoft 365 shells are restored on launch when connected.
     private func seed() {
-        let workID = UUID()
-        let personalID = UUID()
-        let calliopeID = UUID()
-
-        accounts = [
-            MailAccount(
-                id: workID,
-                name: "Kale Yeah Work",
-                email: "derek@kaleyeah.example",
-                tintHex: "1F8A5B",
-                signature: "Derek Brown\nKale Yeah!\nOrganic certification & ops",
-                includeInUnifiedInbox: true,
-                isCalliope: false,
-                sortOrder: 0,
-                inboxPinned: true
-            ),
-            MailAccount(
-                id: personalID,
-                name: "Personal",
-                email: "derek.personal@example.com",
-                tintHex: "5B7C99",
-                signature: "— Derek",
-                includeInUnifiedInbox: true,
-                isCalliope: false,
-                sortOrder: 1,
-                inboxPinned: true
-            ),
-            MailAccount(
-                id: calliopeID,
-                name: "Calliope",
-                email: "calliope@kaleyeah.example",
-                tintHex: "C47A2C",
-                signature: "Calliope · drafting assistant for Kale Yeah!",
-                includeInUnifiedInbox: false,
-                isCalliope: true,
-                sortOrder: 2,
-                inboxPinned: false
-            ),
-        ]
-
+        accounts = []
+        messages = []
         flags = MailFlag.defaults
         lastUsedFlagID = flags.first?.id
-
-        var folderList: [MailFolder] = [
-            MailFolder(id: approveFolderID, accountID: calliopeID, name: "Approve", kind: .approve, sortOrder: -2, isPinned: true, isSmart: true),
+        folders = [
+            MailFolder(id: approveFolderID, accountID: nil, name: "Approve", kind: .approve, sortOrder: -2, isPinned: true, isSmart: true),
             MailFolder(id: snoozedFolderID, accountID: nil, name: "Snoozed", kind: .snoozed, sortOrder: -1, isPinned: true, isSmart: true),
             MailFolder(id: junkFolderID, accountID: nil, name: "Junk", kind: .junk, sortOrder: 90, isPinned: false, isSmart: true),
+            MailFolder(id: archiveFolderID, accountID: nil, name: "Archive", kind: .archive, sortOrder: 91, isPinned: false, isSmart: true),
+            MailFolder(id: trashFolderID, accountID: nil, name: "Trash", kind: .trash, sortOrder: 92, isPinned: false, isSmart: true),
         ]
-
-        for account in accounts {
-            let base = account.sortOrder * 10
-            let inbox = MailFolder(accountID: account.id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: account.inboxPinned)
-            let sent = MailFolder(accountID: account.id, name: "Sent", kind: .sent, sortOrder: base + 1)
-            let drafts = MailFolder(accountID: account.id, name: "Drafts", kind: .drafts, sortOrder: base + 2)
-            let archive = MailFolder(accountID: account.id, name: "Archive", kind: .archive, sortOrder: base + 3)
-            let trash = MailFolder(accountID: account.id, name: "Trash", kind: .trash, sortOrder: base + 4)
-            folderList.append(contentsOf: [inbox, sent, drafts, archive, trash])
-            if account.id == workID {
-                folderList.append(MailFolder(accountID: workID, name: "Inspections", kind: .custom, sortOrder: base + 5))
-                folderList.append(MailFolder(accountID: workID, name: "Vendors", kind: .custom, sortOrder: base + 6))
-            }
-        }
-        folders = folderList
-
-        func inboxID(_ account: UUID) -> UUID {
-            folders.first { $0.accountID == account && $0.kind == .inbox }!.id
-        }
-        func customID(_ name: String) -> UUID {
-            folders.first { $0.name == name && $0.kind == .custom }!.id
-        }
-
-        let cal = Calendar.current
-        func hoursAgo(_ h: Int) -> Date { cal.date(byAdding: .hour, value: -h, to: Date())! }
-        func daysAgo(_ d: Int) -> Date { cal.date(byAdding: .day, value: -d, to: Date())! }
-
-        messages = [
-            MailMessage(
-                accountID: workID,
-                folderID: inboxID(workID),
-                fromName: "Maya Chen",
-                fromAddress: "maya@starfine.example",
-                toAddresses: ["derek@kaleyeah.example"],
-                subject: "Inspection window for PR-3418",
-                snippet: "Can we lock Tuesday morning for the organic walkthrough? Packing line is quieter then.",
-                body: """
-                Hi Derek,
-
-                Can we lock Tuesday morning for the organic walkthrough? Packing line is quieter then.
-
-                I’ll have the lot codes ready.
-
-                Thanks,
-                Maya
-                """,
-                receivedAt: hoursAgo(2),
-                isRead: false,
-                attachments: [
-                    MailAttachment(filename: "lot-codes.pdf", mimeType: "application/pdf", byteSize: 84211, demoPayloadHint: "pdf"),
-                    MailAttachment(filename: "tracker.exe", mimeType: "application/octet-stream", byteSize: 204800, demoPayloadHint: "blocked"),
-                ],
-                deliveredTo: "derek@kaleyeah.example"
-            ),
-            MailMessage(
-                accountID: workID,
-                folderID: inboxID(workID),
-                fromName: "Ops Desk",
-                fromAddress: "ops@kaleyeah.example",
-                toAddresses: ["derek@kaleyeah.example"],
-                ccAddresses: ["team@kaleyeah.example"],
-                subject: "Cold storage humidity nudge",
-                snippet: "Humidity drifted above target overnight. Chart attached — nothing alarming yet.",
-                body: "Humidity drifted above target overnight. Chart attached — nothing alarming yet.\n\nPlease glance when you can.",
-                receivedAt: hoursAgo(5),
-                isRead: true,
-                isFlagged: true,
-                flagID: flags[0].id,
-                attachments: [
-                    MailAttachment(filename: "humidity.png", mimeType: "image/png", byteSize: 120_400, demoPayloadHint: "image"),
-                ],
-                deliveredTo: "derek@kaleyeah.example"
-            ),
-            MailMessage(
-                accountID: workID,
-                folderID: customID("Vendors"),
-                fromName: "JSS Almonds",
-                fromAddress: "billing@jss.example",
-                toAddresses: ["derek@kaleyeah.example"],
-                subject: "PO confirmation Pr2663",
-                snippet: "Confirming receipt of PO Pr2663. Ship date still looks good for next week.",
-                body: "Confirming receipt of PO Pr2663. Ship date still looks good for next week.",
-                receivedAt: daysAgo(1),
-                isRead: true,
-                deliveredTo: "derek@kaleyeah.example"
-            ),
-            MailMessage(
-                accountID: personalID,
-                folderID: inboxID(personalID),
-                fromName: "Library Holds",
-                fromAddress: "holds@citylibrary.example",
-                toAddresses: ["derek.personal@example.com"],
-                subject: "Your hold is ready: Leaf & Ledger",
-                snippet: "A cheerful reminder — your hold is waiting at the front desk through Friday.",
-                body: "A cheerful reminder — your hold is waiting at the front desk through Friday.\n\nHappy reading!",
-                receivedAt: hoursAgo(8),
-                isRead: false,
-                deliveredTo: "derek.personal@example.com"
-            ),
-            MailMessage(
-                accountID: personalID,
-                folderID: inboxID(personalID),
-                fromName: "Sam Rivera",
-                fromAddress: "sam@friends.example",
-                toAddresses: ["derek.personal@example.com"],
-                subject: "Sunday hike?",
-                snippet: "Weather looks kind. Want to do the short ridge loop after brunch?",
-                body: "Weather looks kind. Want to do the short ridge loop after brunch?",
-                receivedAt: daysAgo(2),
-                isRead: true,
-                deliveredTo: "derek.personal@example.com"
-            ),
-            MailMessage(
-                accountID: calliopeID,
-                folderID: approveFolderID,
-                fromName: "Calliope",
-                fromAddress: "calliope@kaleyeah.example",
-                toAddresses: ["maya@starfine.example"],
-                subject: "Re: Inspection window for PR-3418",
-                snippet: "Draft: Thanks Maya — Tuesday 9:30 works on our side. We’ll bring checklists…",
-                body: """
-                Hi Maya,
-
-                Thanks — Tuesday 9:30 works on our side. We’ll bring the Stage 1 checklists and a spare tablet.
-
-                See you then,
-                Derek
-                """,
-                receivedAt: hoursAgo(1),
-                isRead: true,
-                deliveredTo: "calliope@kaleyeah.example",
-                disposition: .pendingApproval,
-                isDraft: true
-            ),
-            MailMessage(
-                accountID: calliopeID,
-                folderID: approveFolderID,
-                fromName: "Calliope",
-                fromAddress: "calliope@kaleyeah.example",
-                toAddresses: ["billing@jss.example"],
-                subject: "Re: PO confirmation Pr2663",
-                snippet: "Draft: Noted — please hold the lot until we confirm cold-chain slots…",
-                body: "Hi,\n\nNoted — please hold the lot until we confirm cold-chain slots tomorrow morning.\n\nThanks,\nDerek",
-                receivedAt: hoursAgo(3),
-                isRead: true,
-                deliveredTo: "calliope@kaleyeah.example",
-                disposition: .pendingApproval,
-                isDraft: true
-            ),
-            MailMessage(
-                accountID: workID,
-                folderID: inboxID(workID),
-                fromName: "Newsletter Sprout",
-                fromAddress: "hello@sproutweekly.example",
-                toAddresses: ["derek@kaleyeah.example"],
-                subject: "Five tiny harvest tips",
-                snippet: "This week: leaf wash order, clipboard cheer, and a kinder way to label bins.",
-                body: "This week: leaf wash order, clipboard cheer, and a kinder way to label bins.",
-                receivedAt: daysAgo(3),
-                isRead: true,
-                deliveredTo: "derek@kaleyeah.example"
-            ),
-            MailMessage(
-                accountID: workID,
-                folderID: junkFolderID,
-                fromName: "Prize Bot",
-                fromAddress: "win@not-real.example",
-                toAddresses: ["derek@kaleyeah.example"],
-                subject: "You won a yacht (no)",
-                snippet: "Obviously junk. Train me later.",
-                body: "Obviously junk. Train me later.",
-                receivedAt: daysAgo(4),
-                isRead: true,
-                attachments: [
-                    MailAttachment(filename: "click-me.js", mimeType: "text/javascript", byteSize: 1200, demoPayloadHint: "blocked"),
-                    MailAttachment(filename: "offer.html", mimeType: "text/html", byteSize: 4400, demoPayloadHint: "blocked"),
-                ],
-                deliveredTo: "derek@kaleyeah.example"
-            ),
-        ]
+        applyPersistedDisplayNames()
     }
 }

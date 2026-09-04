@@ -102,19 +102,42 @@ struct MailAttachment: Identifiable, Hashable, Codable {
     var mimeType: String
     var byteSize: Int
     var demoPayloadHint: String?
+    /// Absolute path under AttachmentStore when content is cached locally.
+    var localPath: String?
+    /// Provider-specific attachment id (e.g. Graph) for optional re-fetch.
+    var remoteID: String?
 
     init(
         id: UUID = UUID(),
         filename: String,
         mimeType: String,
         byteSize: Int,
-        demoPayloadHint: String? = nil
+        demoPayloadHint: String? = nil,
+        localPath: String? = nil,
+        remoteID: String? = nil
     ) {
         self.id = id
         self.filename = filename
         self.mimeType = mimeType
         self.byteSize = byteSize
         self.demoPayloadHint = demoPayloadHint
+        self.localPath = localPath
+        self.remoteID = remoteID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, filename, mimeType, byteSize, demoPayloadHint, localPath, remoteID
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        filename = try c.decode(String.self, forKey: .filename)
+        mimeType = try c.decode(String.self, forKey: .mimeType)
+        byteSize = try c.decode(Int.self, forKey: .byteSize)
+        demoPayloadHint = try c.decodeIfPresent(String.self, forKey: .demoPayloadHint)
+        localPath = try c.decodeIfPresent(String.self, forKey: .localPath)
+        remoteID = try c.decodeIfPresent(String.self, forKey: .remoteID)
     }
 
     var isPreviewable: Bool {
@@ -132,6 +155,11 @@ struct MailAttachment: Identifiable, Hashable, Codable {
         return blocked.contains(ext)
             || mimeType.contains("javascript")
             || mimeType.contains("html")
+    }
+
+    var hasLocalContent: Bool {
+        guard let localPath, !localPath.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: localPath)
     }
 }
 
@@ -271,6 +299,29 @@ enum ComposeMode: Hashable {
     case editDraft(MailMessage)
 }
 
+struct ComposeAttachment: Identifiable, Hashable, Codable {
+    var id: UUID
+    var filename: String
+    var mimeType: String
+    var byteSize: Int
+    /// Cached absolute path (copied from NSOpenPanel selection).
+    var localPath: String
+
+    init(
+        id: UUID = UUID(),
+        filename: String,
+        mimeType: String,
+        byteSize: Int,
+        localPath: String
+    ) {
+        self.id = id
+        self.filename = filename
+        self.mimeType = mimeType
+        self.byteSize = byteSize
+        self.localPath = localPath
+    }
+}
+
 struct ComposeDraft: Identifiable, Hashable {
     var id = UUID()
     var mode: ComposeMode
@@ -281,4 +332,5 @@ struct ComposeDraft: Identifiable, Hashable {
     var body: String
     var accountID: UUID
     var popOut: Bool = false
+    var attachments: [ComposeAttachment] = []
 }

@@ -69,6 +69,20 @@ enum IMAPAccountSyncService {
             let fetched = try await imap.fetchRecent(mailbox: info.name, limit: provider.recentLimit)
             for item in fetched {
                 let id = stableMessageID(provider: provider, email: email, mailbox: info.name, uid: item.uid)
+                var attachments: [MailAttachment] = []
+                for raw in item.rawAttachments {
+                    let attID = UUID()
+                    let path = try? AttachmentStore.save(data: raw.data, filename: raw.filename, messageID: id)
+                    attachments.append(
+                        MailAttachment(
+                            id: attID,
+                            filename: raw.filename,
+                            mimeType: raw.mimeType,
+                            byteSize: raw.data.count,
+                            localPath: path
+                        )
+                    )
+                }
                 let msg = MailMessage(
                     id: id,
                     accountID: accountID,
@@ -84,6 +98,7 @@ enum IMAPAccountSyncService {
                     receivedAt: item.date,
                     isRead: item.isRead,
                     isFlagged: item.isFlagged,
+                    attachments: attachments,
                     deliveredTo: email,
                     disposition: .normal,
                     isDraft: info.kind == .drafts
@@ -117,12 +132,19 @@ enum IMAPAccountSyncService {
         let smtp = SimpleSMTPClient()
         try await connectSMTP(smtp, provider: provider)
         try await smtp.login(email: email, password: password, stripSpaces: provider.stripPasswordSpaces)
+        var outbound: [SimpleSMTPClient.OutboundAttachment] = []
+        for att in draft.attachments {
+            if let data = AttachmentStore.load(path: att.localPath) {
+                outbound.append(.init(filename: att.filename, mimeType: att.mimeType, data: data))
+            }
+        }
         try await smtp.send(
             from: draft.fromAddress.isEmpty ? email : draft.fromAddress,
             to: to,
             cc: cc,
             subject: draft.subject,
-            body: body
+            body: body,
+            attachments: outbound
         )
         await smtp.quit()
     }

@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import PDFKit
 
 struct ReadingPaneView: View {
     @Environment(DemoMailStore.self) private var store
@@ -11,6 +13,7 @@ struct ReadingPaneView: View {
 
     @State private var previewAttachment: MailAttachment?
     @State private var showBlockedAlert = false
+    @State private var saveError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,7 +34,7 @@ struct ReadingPaneView: View {
                         attachmentsSection
                             .padding(20)
                     }
-                    .frame(maxHeight: 160)
+                    .frame(maxHeight: 180)
                 }
             } else {
                 ScrollView {
@@ -72,6 +75,14 @@ struct ReadingPaneView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Executable, JavaScript, and HTML attachments cannot be previewed in RapSoDee.")
+        }
+        .alert("Could not save", isPresented: Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { saveError = nil }
+        } message: {
+            Text(saveError ?? "")
         }
     }
 
@@ -191,7 +202,7 @@ struct ReadingPaneView: View {
         HStack {
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(MuseTheme.approve)
-            Text("Calliope draft — edit freely, then Approve & Send or Reject.")
+            Text("Draft pending approval — edit freely, then Approve & Send or Reject.")
                 .font(.callout.weight(.medium))
             Spacer()
         }
@@ -214,6 +225,14 @@ struct ReadingPaneView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if attachment.hasLocalContent {
+                        Button("Save…") { saveAttachment(attachment) }
+                            .buttonStyle(MuseCapsuleButtonStyle())
+                        if !attachment.isBlockedType {
+                            Button("Open") { openAttachment(attachment) }
+                                .buttonStyle(MuseCapsuleButtonStyle())
+                        }
+                    }
                     Button(attachment.isPreviewable ? "Preview" : (attachment.isBlockedType ? "Blocked" : "No preview")) {
                         if attachment.isBlockedType {
                             showBlockedAlert = true
@@ -222,7 +241,7 @@ struct ReadingPaneView: View {
                         }
                     }
                     .buttonStyle(MuseCapsuleButtonStyle())
-                    .disabled(!attachment.isPreviewable)
+                    .disabled(!attachment.isPreviewable || !attachment.hasLocalContent)
                 }
                 .padding(10)
                 .background(
@@ -233,6 +252,27 @@ struct ReadingPaneView: View {
             Text("Previews are never automatic — tap Preview for PDF/images only.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func openAttachment(_ attachment: MailAttachment) {
+        guard let path = attachment.localPath else { return }
+        NSWorkspace.shared.open(AttachmentStore.fileURL(path: path))
+    }
+
+    private func saveAttachment(_ attachment: MailAttachment) {
+        guard let path = attachment.localPath, let data = AttachmentStore.load(path: path) else {
+            saveError = "Attachment content is not available locally."
+            return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = attachment.filename
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            saveError = "Could not write the file."
         }
     }
 }
@@ -250,38 +290,50 @@ struct AttachmentPreviewSheet: View {
                 Button("Done") { dismiss() }
                     .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
             }
-            if attachment.mimeType.hasPrefix("image/") {
-                RoundedRectangle(cornerRadius: MuseTheme.cornerLarge, style: .continuous)
-                    .fill(MuseTheme.sage)
-                    .overlay {
-                        VStack(spacing: 8) {
-                            Image(systemName: "photo")
-                                .font(.largeTitle)
-                                .foregroundStyle(MuseTheme.leaf)
-                            Text("Demo image preview")
-                                .foregroundStyle(.secondary)
-                        }
+            Group {
+                if attachment.isBlockedType {
+                    Text("This attachment type cannot be previewed.")
+                        .foregroundStyle(.secondary)
+                } else if let path = attachment.localPath {
+                    let url = AttachmentStore.fileURL(path: path)
+                    if attachment.mimeType.hasPrefix("image/"), let image = NSImage(contentsOf: url) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if attachment.mimeType == "application/pdf" || url.pathExtension.lowercased() == "pdf" {
+                        PDFKitRepresentedView(url: url)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        Text("No preview available — use Open or Save.")
+                            .foregroundStyle(.secondary)
                     }
-                    .frame(minHeight: 280)
-            } else if attachment.mimeType == "application/pdf" {
-                RoundedRectangle(cornerRadius: MuseTheme.cornerLarge, style: .continuous)
-                    .fill(MuseTheme.paper)
-                    .overlay {
-                        VStack(spacing: 8) {
-                            Image(systemName: "doc.richtext")
-                                .font(.largeTitle)
-                                .foregroundStyle(MuseTheme.leaf)
-                            Text("Demo PDF preview — Stage 1 stub")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(minHeight: 280)
-            } else {
-                Text("No preview available")
+                } else {
+                    Text("Attachment content is not available.")
+                        .foregroundStyle(.secondary)
+                }
             }
+            .frame(minHeight: 280)
             Spacer()
         }
         .padding(20)
-        .frame(minWidth: 420, minHeight: 360)
+        .frame(minWidth: 520, minHeight: 420)
+    }
+}
+
+private struct PDFKitRepresentedView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.document = PDFDocument(url: url)
+        return view
+    }
+
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        if nsView.document?.documentURL != url {
+            nsView.document = PDFDocument(url: url)
+        }
     }
 }
