@@ -60,7 +60,7 @@ struct ContentView: View {
         }
         .onAppear {
             hydrateFlagsIfNeeded()
-            Task { await store.bootstrapGmailOnLaunch() }
+            Task { await store.bootstrapLiveAccountsOnLaunch() }
         }
         .overlay(alignment: .top) {
             if store.gmailNeedsSetup && !dismissGmailPrompt {
@@ -171,6 +171,7 @@ struct ContentView: View {
         switch mode {
         case .new:
             let account = store.gmailAccount()
+                ?? store.office365Account()
                 ?? store.accounts.first { !$0.isCalliope }
                 ?? store.accounts[0]
             let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"

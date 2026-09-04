@@ -1,22 +1,23 @@
 import Foundation
 import Security
 
-/// Stores Gmail App Passwords in the macOS Keychain only — never in source or UserDefaults.
+/// Stores mailbox / app passwords in the macOS Keychain only — never in source or UserDefaults.
 enum KeychainCredentialStore {
-    private static let service = "local.rapsodee.mail.gmail"
+    private static let service = "local.rapsodee.mail"
+    /// Pre–Microsoft 365 service name; still read for Gmail credentials saved earlier.
+    private static let legacyGmailService = "local.rapsodee.mail.gmail"
 
     static func savePassword(_ password: String, forEmail email: String) throws {
         let account = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let data = Data(password.utf8)
-        let query: [String: Any] = [
+        deletePassword(forEmail: email)
+        let add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        SecItemDelete(query as CFDictionary)
-        var add = query
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw KeychainError.unhandled(status)
@@ -25,6 +26,32 @@ enum KeychainCredentialStore {
 
     static func password(forEmail email: String) -> String? {
         let account = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let data = copyPasswordData(service: service, account: account) {
+            return String(data: data, encoding: .utf8)
+        }
+        if let data = copyPasswordData(service: legacyGmailService, account: account) {
+            return String(data: data, encoding: .utf8)
+        }
+        return nil
+    }
+
+    static func deletePassword(forEmail email: String) {
+        let account = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for svc in [service, legacyGmailService] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: svc,
+                kSecAttrAccount as String: account,
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
+    }
+
+    static func hasCredentials(forEmail email: String) -> Bool {
+        password(forEmail: email) != nil
+    }
+
+    private static func copyPasswordData(service: String, account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -35,21 +62,7 @@ enum KeychainCredentialStore {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    static func deletePassword(forEmail email: String) {
-        let account = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-
-    static func hasCredentials(forEmail email: String) -> Bool {
-        password(forEmail: email) != nil
+        return data
     }
 
     enum KeychainError: LocalizedError {

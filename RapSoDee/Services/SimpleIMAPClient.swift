@@ -32,7 +32,7 @@ struct IMAPFetchedMessage {
     var isFlagged: Bool { flags.contains { $0.uppercased() == "\\FLAGGED" } }
 }
 
-/// Lightweight IMAP client for Gmail (imap.gmail.com:993).
+/// Lightweight IMAP client (host/port overrides for Gmail / Microsoft 365).
 actor SimpleIMAPClient {
     private var conn: MailTLSConnection?
     private var tagCounter = 0
@@ -45,8 +45,8 @@ actor SimpleIMAPClient {
         _ = try await c.readLine() // greeting
     }
 
-    func login(email: String, password: String) async throws {
-        let pass = password.replacingOccurrences(of: " ", with: "")
+    func login(email: String, password: String, stripSpaces: Bool = true) async throws {
+        let pass = stripSpaces ? password.replacingOccurrences(of: " ", with: "") : password
         let response = try await tagged("LOGIN \(quote(email)) \(quote(pass))")
         guard response.contains("OK") else { throw MailNetError.authFailed(response) }
     }

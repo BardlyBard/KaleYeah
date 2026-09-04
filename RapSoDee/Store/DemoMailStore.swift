@@ -24,6 +24,12 @@ final class DemoMailStore: MailStore {
     var gmailNeedsSetup: Bool = true
     var gmailLastError: String?
 
+    // MARK: Microsoft 365 live account
+    var office365SyncStatus: String = ""
+    var office365IsSyncing: Bool = false
+    var office365NeedsSetup: Bool = true
+    var office365LastError: String?
+
     private let archiveFolderID = UUID()
     private let trashFolderID = UUID()
     private let snoozedFolderID = UUID()
@@ -33,7 +39,9 @@ final class DemoMailStore: MailStore {
     init() {
         seed()
         restoreGmailAccountShellIfNeeded()
+        restoreOffice365AccountShellIfNeeded()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
+        office365NeedsSetup = !Office365SyncService.hasKeychainCredentials(email: office365Account()?.email)
     }
 
     func account(for id: UUID) -> MailAccount? { accounts.first { $0.id == id } }
@@ -287,6 +295,10 @@ final class DemoMailStore: MailStore {
             Task { @MainActor in await sendGmailCompose(draft) }
             return
         }
+        if let account = account(for: draft.accountID), account.isLiveOffice365 {
+            Task { @MainActor in await sendOffice365Compose(draft) }
+            return
+        }
         insertLocalSent(draft)
     }
 
@@ -513,7 +525,7 @@ final class DemoMailStore: MailStore {
             gmailSyncStatus = "Paste a Gmail App Password in Settings"
             return
         }
-        guard let folderIDs = gmailFolderIDs(for: account.id) else {
+        guard let folderIDs = liveFolderIDs(for: account.id) else {
             gmailLastError = "Gmail folders missing"
             return
         }
@@ -559,17 +571,33 @@ final class DemoMailStore: MailStore {
     }
 
     func bootstrapGmailOnLaunch() async {
+        await bootstrapLiveAccountsOnLaunch()
+    }
+
+    func bootstrapLiveAccountsOnLaunch() async {
         restoreGmailAccountShellIfNeeded()
+        restoreOffice365AccountShellIfNeeded()
         if let account = gmailAccount(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
             gmailNeedsSetup = false
             await syncGmailNow()
         } else {
             gmailNeedsSetup = true
-            gmailSyncStatus = "Demo accounts ready. Add Gmail App Password in Settings → Accounts."
+            if gmailSyncStatus.isEmpty {
+                gmailSyncStatus = "Demo accounts ready. Add Gmail App Password in Settings → Accounts."
+            }
+        }
+        if let account = office365Account(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
+            office365NeedsSetup = false
+            await syncOffice365Now()
+        } else {
+            office365NeedsSetup = true
+            if office365SyncStatus.isEmpty {
+                office365SyncStatus = "Optional: add Microsoft 365 in Settings → Accounts."
+            }
         }
     }
 
-    private func gmailFolderIDs(for accountID: UUID) -> GmailFolderIDs? {
+    private func liveFolderIDs(for accountID: UUID) -> IMAPFolderIDs? {
         guard
             let inbox = folders.first(where: { $0.accountID == accountID && $0.kind == .inbox })?.id,
             let sent = folders.first(where: { $0.accountID == accountID && $0.kind == .sent })?.id,
@@ -577,7 +605,7 @@ final class DemoMailStore: MailStore {
             let archive = folders.first(where: { $0.accountID == accountID && $0.kind == .archive })?.id,
             let trash = folders.first(where: { $0.accountID == accountID && $0.kind == .trash })?.id
         else { return nil }
-        return GmailFolderIDs(inbox: inbox, sent: sent, drafts: drafts, archive: archive, trash: trash)
+        return IMAPFolderIDs(inbox: inbox, sent: sent, drafts: drafts, archive: archive, trash: trash)
     }
 
     private func sendGmailCompose(_ draft: ComposeDraft) async {
@@ -607,6 +635,210 @@ final class DemoMailStore: MailStore {
             gmailSyncStatus = "Send failed"
         }
         gmailIsSyncing = false
+    }
+
+
+    // MARK: - Live Microsoft 365
+
+    func office365Account() -> MailAccount? {
+        accounts.first { $0.isLiveOffice365 }
+    }
+
+    func restoreOffice365AccountShellIfNeeded() {
+        if office365Account() != nil { return }
+        let email = Office365SyncService.storedEmail() ?? Office365Defaults.defaultEmail
+        let id = Office365SyncService.storedAccountID() ?? UUID()
+        let hasCreds = KeychainCredentialStore.hasCredentials(forEmail: email)
+        let remembered = Office365SyncService.storedEmail() != nil
+        guard hasCreds || remembered else { return }
+        ensureOffice365Account(email: email, id: id)
+    }
+
+    @discardableResult
+    func ensureOffice365Account(email: String, id: UUID = UUID()) -> MailAccount {
+        if let existing = office365Account() {
+            if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
+                accounts[i].email = email
+                accounts[i].name = "Microsoft 365"
+                accounts[i].tintHex = accounts[i].tintHex.isEmpty ? Office365Defaults.tintHex : accounts[i].tintHex
+            }
+            Office365SyncService.rememberAccount(email: email, id: existing.id)
+            return accounts.first { $0.isLiveOffice365 }!
+        }
+        let account = MailAccount(
+            id: id,
+            name: "Microsoft 365",
+            email: email,
+            tintHex: Office365Defaults.tintHex,
+            signature: "Derek Brown\nKale Yeah Inspections",
+            includeInUnifiedInbox: true,
+            isCalliope: false,
+            sortOrder: -1,
+            inboxPinned: true,
+            isLiveGmail: false,
+            isLiveOffice365: true
+        )
+        // Place after live Gmail if present, else at front.
+        if let gmailIdx = accounts.firstIndex(where: { $0.isLiveGmail }) {
+            accounts.insert(account, at: gmailIdx + 1)
+        } else {
+            accounts.insert(account, at: 0)
+        }
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
+        }
+        let base = -20
+        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true)
+        let sent = MailFolder(accountID: id, name: "Sent", kind: .sent, sortOrder: base + 1)
+        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2)
+        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3)
+        let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
+        folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
+        Office365SyncService.rememberAccount(email: email, id: id)
+        return account
+    }
+
+    func removeOffice365Account() {
+        guard let account = office365Account() else { return }
+        KeychainCredentialStore.deletePassword(forEmail: account.email)
+        Office365SyncService.clearRememberedAccount()
+        messages.removeAll { $0.accountID == account.id }
+        folders.removeAll { $0.accountID == account.id }
+        accounts.removeAll { $0.id == account.id }
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
+        }
+        office365NeedsSetup = true
+        office365SyncStatus = "Microsoft 365 account removed — Gmail and demo mail still available."
+        office365LastError = nil
+    }
+
+    func saveOffice365Credentials(email: String, password: String) throws {
+        let cleaned = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pass = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, !pass.isEmpty else {
+            throw MailNetError.unexpected("Email and mailbox password are required")
+        }
+        try KeychainCredentialStore.savePassword(pass, forEmail: cleaned)
+        _ = ensureOffice365Account(email: cleaned, id: Office365SyncService.storedAccountID() ?? UUID())
+        office365NeedsSetup = false
+        office365SyncStatus = "Credentials saved in Keychain."
+        office365LastError = nil
+    }
+
+    func testOffice365Connection(email overrideEmail: String? = nil, password overridePassword: String? = nil) async {
+        let email = (overrideEmail ?? office365Account()?.email ?? Office365SyncService.storedEmail() ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty else {
+            office365LastError = "Enter a Microsoft 365 address"
+            return
+        }
+        let fieldPass = (overridePassword ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let password: String
+        if !fieldPass.isEmpty {
+            password = fieldPass
+        } else if let stored = KeychainCredentialStore.password(forEmail: email) {
+            password = stored
+        } else {
+            office365LastError = "Enter a mailbox password or save credentials first"
+            office365NeedsSetup = true
+            return
+        }
+        office365IsSyncing = true
+        office365LastError = nil
+        office365SyncStatus = "Testing connection…"
+        do {
+            try await Office365SyncService.testConnection(email: email, password: password)
+            office365SyncStatus = "Connection OK (IMAP + SMTP)"
+        } catch {
+            office365LastError = error.localizedDescription
+            office365SyncStatus = "Connection failed"
+        }
+        office365IsSyncing = false
+    }
+
+    func syncOffice365Now() async {
+        guard let account = office365Account() else {
+            office365NeedsSetup = true
+            office365SyncStatus = "Add Microsoft 365 in Settings → Accounts"
+            return
+        }
+        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+            office365NeedsSetup = true
+            office365SyncStatus = "Enter mailbox password in Settings"
+            return
+        }
+        guard let folderIDs = liveFolderIDs(for: account.id) else {
+            office365LastError = "Microsoft 365 folders missing"
+            return
+        }
+        office365IsSyncing = true
+        office365LastError = nil
+        office365SyncStatus = "Syncing Microsoft 365…"
+        let previousIDs = Set(messages.filter { $0.accountID == account.id }.map(\.id))
+        do {
+            let (fetched, _, result) = try await Office365SyncService.sync(
+                email: account.email,
+                password: password,
+                accountID: account.id,
+                folderIDs: folderIDs
+            )
+            var flagMemory: [UUID: (Bool, UUID?)] = [:]
+            for m in messages where m.accountID == account.id {
+                flagMemory[m.id] = (m.isFlagged, m.flagID)
+            }
+            messages.removeAll { $0.accountID == account.id }
+            var newOnes: [MailMessage] = []
+            for var msg in fetched {
+                if let mem = flagMemory[msg.id], mem.0 {
+                    msg.isFlagged = true
+                    msg.flagID = mem.1
+                }
+                if !previousIDs.contains(msg.id) && !msg.isRead {
+                    newOnes.append(msg)
+                }
+                messages.append(msg)
+            }
+            messages.sort { $0.receivedAt > $1.receivedAt }
+            office365SyncStatus = result.status
+            office365NeedsSetup = false
+            for msg in newOnes.prefix(3) {
+                applyNotificationPolicy(for: msg)
+            }
+        } catch {
+            office365LastError = error.localizedDescription
+            office365SyncStatus = "Sync failed"
+        }
+        office365IsSyncing = false
+    }
+
+    private func sendOffice365Compose(_ draft: ComposeDraft) async {
+        guard let account = account(for: draft.accountID), account.isLiveOffice365 else {
+            insertLocalSent(draft)
+            return
+        }
+        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+            office365LastError = "Missing mailbox password — open Settings → Accounts"
+            office365NeedsSetup = true
+            return
+        }
+        office365IsSyncing = true
+        office365SyncStatus = "Sending…"
+        do {
+            try await Office365SyncService.send(
+                email: account.email,
+                password: password,
+                draft: draft,
+                signature: account.signature
+            )
+            insertLocalSent(draft)
+            office365SyncStatus = "Sent via Microsoft 365 SMTP"
+            office365LastError = nil
+        } catch {
+            office365LastError = error.localizedDescription
+            office365SyncStatus = "Send failed"
+        }
+        office365IsSyncing = false
     }
 
     // MARK: - Seed

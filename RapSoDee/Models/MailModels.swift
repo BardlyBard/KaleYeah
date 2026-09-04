@@ -13,6 +13,10 @@ struct MailAccount: Identifiable, Hashable, Codable {
     var inboxPinned: Bool
     /// Live Gmail (IMAP/SMTP via app password). Demo accounts stay false.
     var isLiveGmail: Bool
+    /// Live Microsoft 365 / GoDaddy Email Essentials (IMAP/SMTP via mailbox password).
+    var isLiveOffice365: Bool
+
+    var isLiveIMAP: Bool { isLiveGmail || isLiveOffice365 }
 
     init(
         id: UUID = UUID(),
@@ -24,7 +28,8 @@ struct MailAccount: Identifiable, Hashable, Codable {
         isCalliope: Bool = false,
         sortOrder: Int = 0,
         inboxPinned: Bool = true,
-        isLiveGmail: Bool = false
+        isLiveGmail: Bool = false,
+        isLiveOffice365: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -36,10 +41,11 @@ struct MailAccount: Identifiable, Hashable, Codable {
         self.sortOrder = sortOrder
         self.inboxPinned = inboxPinned
         self.isLiveGmail = isLiveGmail
+        self.isLiveOffice365 = isLiveOffice365
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, email, tintHex, signature, includeInUnifiedInbox, isCalliope, sortOrder, inboxPinned, isLiveGmail
+        case id, name, email, tintHex, signature, includeInUnifiedInbox, isCalliope, sortOrder, inboxPinned, isLiveGmail, isLiveOffice365
     }
 
     init(from decoder: Decoder) throws {
@@ -54,6 +60,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         inboxPinned = try c.decodeIfPresent(Bool.self, forKey: .inboxPinned) ?? true
         isLiveGmail = try c.decodeIfPresent(Bool.self, forKey: .isLiveGmail) ?? false
+        isLiveOffice365 = try c.decodeIfPresent(Bool.self, forKey: .isLiveOffice365) ?? false
     }
 }
 

@@ -16,6 +16,11 @@ struct SettingsView: View {
     @State private var gmailSecureFieldID = UUID()
     @State private var gmailBusy = false
 
+    @State private var office365Email = Office365Defaults.defaultEmail
+    @State private var office365Password = ""
+    @State private var office365SecureFieldID = UUID()
+    @State private var office365Busy = false
+
     var body: some View {
         NavigationStack {
             Form {
@@ -97,6 +102,86 @@ struct SettingsView: View {
                             gmailAppPassword = ""
                             gmailSecureFieldID = UUID()
                             gmailEmail = GmailDefaults.defaultEmail
+                        }
+                    }
+                }
+
+                Section("Accounts — Microsoft 365") {
+                    TextField("Email", text: $office365Email)
+                    MacSecureField(text: $office365Password, placeholder: "Mailbox password")
+                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .id(office365SecureFieldID)
+                    HStack {
+                        if office365PasswordTrimmed.isEmpty {
+                            Text("No password entered")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Password entered (\(office365PasswordTrimmed.count) characters)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    Text("GoDaddy Email Essentials / Microsoft 365 mailbox password for \(Office365Defaults.defaultEmail). IMAP outlook.office365.com:993 · SMTP smtp.office365.com:587 STARTTLS. Stored only in macOS Keychain — never committed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let m365 = store.office365Account() {
+                        HStack(spacing: 8) {
+                            Circle().fill(Color(hex: m365.tintHex)).frame(width: 10, height: 10)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(m365.name).font(.headline)
+                                Text(m365.email).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if store.office365IsSyncing || office365Busy {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                    }
+
+                    if !store.office365SyncStatus.isEmpty {
+                        Text(store.office365SyncStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let err = store.office365LastError, !err.isEmpty {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(store.office365Account() == nil ? "Add Microsoft 365" : "Save Password") {
+                            Task { await saveOffice365() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canSaveOffice365)
+
+                        Button("Test connection") {
+                            Task { await testOffice365FromSettings() }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canTestOffice365)
+
+                        Button("Sync now") {
+                            Task {
+                                office365Busy = true
+                                await store.syncOffice365Now()
+                                office365Busy = false
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canSyncOffice365)
+                    }
+
+                    if store.office365Account() != nil {
+                        Button("Remove Microsoft 365 account", role: .destructive) {
+                            store.removeOffice365Account()
+                            office365Password = ""
+                            office365SecureFieldID = UUID()
+                            office365Email = Office365Defaults.defaultEmail
                         }
                     }
                 }
@@ -284,6 +369,11 @@ struct SettingsView: View {
                 } else {
                     gmailEmail = GmailDefaults.defaultEmail
                 }
+                if let email = store.office365Account()?.email ?? Office365SyncService.storedEmail() {
+                    office365Email = email
+                } else {
+                    office365Email = Office365Defaults.defaultEmail
+                }
             }
         }
         .frame(minWidth: 560, minHeight: 480)
@@ -340,6 +430,56 @@ struct SettingsView: View {
         gmailBusy = false
     }
 
+    private var office365EmailTrimmed: String {
+        office365Email.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var office365PasswordTrimmed: String {
+        office365Password.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSaveOffice365: Bool {
+        !office365Busy
+            && !office365EmailTrimmed.isEmpty
+            && !office365PasswordTrimmed.isEmpty
+    }
+
+    private var canTestOffice365: Bool {
+        guard !office365Busy, !store.office365IsSyncing, !office365EmailTrimmed.isEmpty else { return false }
+        if !office365PasswordTrimmed.isEmpty { return true }
+        return KeychainCredentialStore.hasCredentials(forEmail: office365EmailTrimmed)
+    }
+
+    private var canSyncOffice365: Bool {
+        guard let account = store.office365Account(), !office365Busy, !store.office365IsSyncing else { return false }
+        return KeychainCredentialStore.hasCredentials(forEmail: account.email)
+    }
+
+    private func saveOffice365() async {
+        office365Busy = true
+        store.office365LastError = nil
+        do {
+            try store.saveOffice365Credentials(email: office365EmailTrimmed, password: office365PasswordTrimmed)
+            office365Password = ""
+            office365SecureFieldID = UUID()
+            store.office365SyncStatus = "Credentials saved in Keychain."
+            await store.testOffice365Connection(email: office365EmailTrimmed)
+            if store.office365LastError == nil {
+                await store.syncOffice365Now()
+            }
+        } catch {
+            store.office365LastError = error.localizedDescription
+        }
+        office365Busy = false
+    }
+
+    private func testOffice365FromSettings() async {
+        office365Busy = true
+        let fieldPass = office365PasswordTrimmed.isEmpty ? nil : office365PasswordTrimmed
+        await store.testOffice365Connection(email: office365EmailTrimmed, password: fieldPass)
+        office365Busy = false
+    }
+
     private func liveFlag(_ id: UUID) -> MailFlag? {
         store.flags.first { $0.id == id }
     }
@@ -389,8 +529,8 @@ struct SettingsView: View {
         if let data = row.accountsJSON, let accounts = try? JSONDecoder().decode([MailAccount].self, from: data) {
             // Keep live message IDs; merge settings fields onto seeded accounts by email.
             for account in accounts {
-                if account.isLiveGmail {
-                    continue // live Gmail is restored from Keychain / UserDefaults
+                if account.isLiveGmail || account.isLiveOffice365 {
+                    continue // live IMAP accounts are restored from Keychain / UserDefaults
                 }
                 if let i = store.accounts.firstIndex(where: { $0.email == account.email }) {
                     store.accounts[i].includeInUnifiedInbox = account.includeInUnifiedInbox
