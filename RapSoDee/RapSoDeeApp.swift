@@ -15,7 +15,18 @@ struct RapSoDeeApp: App {
         do {
             return try ModelContainer(for: schema, configurations: [configuration])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            // Stage 1: wipe local store on lightweight-migration mismatches (e.g. new settings fields).
+            let url = configuration.url
+            let fm = FileManager.default
+            for suffix in ["", "-shm", "-wal"] {
+                let victim = URL(fileURLWithPath: url.path + suffix)
+                try? fm.removeItem(at: victim)
+            }
+            do {
+                return try ModelContainer(for: schema, configurations: [configuration])
+            } catch {
+                fatalError("Could not create ModelContainer: \(error)")
+            }
         }
     }()
 

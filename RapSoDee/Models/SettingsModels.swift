@@ -23,7 +23,7 @@ final class PersistedAppSettings {
     var filterRaw: String
     var vipAddressesCSV: String
     var notificationPolicyRaw: String
-    var playSoundForNewMail: Bool
+    var playSoundForNewMail: Bool = true
     /// JSON blob mirroring account toggles / signatures for Stage 1 persistence.
     var accountsJSON: Data?
     var foldersJSON: Data?
