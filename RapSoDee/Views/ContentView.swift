@@ -111,6 +111,21 @@ struct ContentView: View {
             }
             .help("New Message")
 
+            FlagToolbarMenu(
+                flags: store.flags,
+                currentFlagID: selectedMessage?.flagID,
+                isFlagged: selectedMessage?.isFlagged ?? false,
+                isEnabled: selectedMessage != nil,
+                onSelect: { flagID in
+                    guard let id = selectedMessageID else { return }
+                    store.setFlag(id, flagID: flagID)
+                },
+                onClear: {
+                    guard let id = selectedMessageID else { return }
+                    store.setFlag(id, flagID: nil)
+                }
+            )
+
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
@@ -210,7 +225,7 @@ struct ContentView: View {
 
     private func flagSelected() {
         guard let id = selectedMessageID else { return }
-        store.toggleFlag(id, flagID: store.flags.first?.id)
+        store.flagShortcut(id)
     }
 
     private func moveSelection(_ delta: Int) {
@@ -228,7 +243,14 @@ struct ContentView: View {
         guard !didHydrate else { return }
         didHydrate = true
         let existing = (try? modelContext.fetch(FetchDescriptor<PersistedFlag>())) ?? []
-        if existing.isEmpty {
+        // Upgrade sparse/legacy seeds so Derek always sees a full color chooser.
+        let needsDefaults = existing.isEmpty || existing.count < MailFlag.defaults.count
+        if needsDefaults {
+            for row in existing { modelContext.delete(row) }
+            if store.flags.count < MailFlag.defaults.count {
+                store.flags = MailFlag.defaults
+            }
+            store.lastUsedFlagID = store.flags.first?.id
             for (i, flag) in store.flags.enumerated() {
                 modelContext.insert(PersistedFlag(id: flag.id, name: flag.name, colorHex: flag.colorHex, sortOrder: i))
             }
@@ -237,6 +259,7 @@ struct ContentView: View {
             store.flags = existing
                 .sorted { $0.sortOrder < $1.sortOrder }
                 .map { MailFlag(id: $0.id, name: $0.name, colorHex: $0.colorHex) }
+            store.lastUsedFlagID = store.flags.first?.id
         }
     }
 }

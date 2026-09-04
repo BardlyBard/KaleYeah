@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */; };
+		18484EB4A3C04EB7044D63CC /* FlagMenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11F578DAC374C39E9BB29BE1 /* FlagMenuContent.swift */; };
 		2E38EDF0247122E10ED00B41 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 011476096BD250F13FF78C8F /* SettingsView.swift */; };
 		407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36684E996FD0A65878AA7714 /* FilePickerSheet.swift */; };
 		557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */; };
@@ -27,6 +28,7 @@
 
 /* Begin PBXFileReference section */
 		011476096BD250F13FF78C8F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		11F578DAC374C39E9BB29BE1 /* FlagMenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlagMenuContent.swift; sourceTree = "<group>"; };
 		31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnoozeSheet.swift; sourceTree = "<group>"; };
 		338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		36684E996FD0A65878AA7714 /* FilePickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePickerSheet.swift; sourceTree = "<group>"; };
@@ -95,6 +97,7 @@
 			isa = PBXGroup;
 			children = (
 				36684E996FD0A65878AA7714 /* FilePickerSheet.swift */,
+				11F578DAC374C39E9BB29BE1 /* FlagMenuContent.swift */,
 				790C971D69A2BA935411A556 /* KeyboardCommands.swift */,
 				31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */,
 			);
@@ -210,6 +213,7 @@
 				CD80E90A36403943257098A6 /* ContentView.swift in Sources */,
 				84749A185DB597F106310035 /* DemoMailStore.swift in Sources */,
 				407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */,
+				18484EB4A3C04EB7044D63CC /* FlagMenuContent.swift in Sources */,
 				A8E3DD59017D6E4B37F8DE04 /* KeyboardCommands.swift in Sources */,
 				557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */,
 				6746D15381E028C1AAB62B98 /* MailStore.swift in Sources */,

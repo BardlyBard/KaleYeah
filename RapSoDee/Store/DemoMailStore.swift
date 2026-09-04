@@ -8,6 +8,8 @@ final class DemoMailStore: MailStore {
     var folders: [MailFolder] = []
     var messages: [MailMessage] = []
     var flags: [MailFlag] = []
+    /// Last flag chosen from a UI menu — used by the keyboard shortcut.
+    var lastUsedFlagID: UUID?
     var sort: MessageSort = .dateNewest
     var filter: MessageFilter = .all
     var searchText: String = ""
@@ -79,16 +81,34 @@ final class DemoMailStore: MailStore {
     }
 
     func toggleFlag(_ id: UUID, flagID: UUID?) {
+        // Legacy entry point: explicit flagID sets; nil clears if flagged else applies first.
+        if let flagID {
+            setFlag(id, flagID: flagID)
+        } else if messages.first(where: { $0.id == id })?.isFlagged == true {
+            setFlag(id, flagID: nil)
+        } else {
+            setFlag(id, flagID: lastUsedFlagID ?? flags.first?.id)
+        }
+    }
+
+    func setFlag(_ id: UUID, flagID: UUID?) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
         if let flagID {
             messages[i].isFlagged = true
             messages[i].flagID = flagID
-        } else if messages[i].isFlagged {
+            lastUsedFlagID = flagID
+        } else {
             messages[i].isFlagged = false
             messages[i].flagID = nil
+        }
+    }
+
+    func flagShortcut(_ id: UUID) {
+        guard let message = messages.first(where: { $0.id == id }) else { return }
+        if message.isFlagged {
+            setFlag(id, flagID: nil)
         } else {
-            messages[i].isFlagged = true
-            messages[i].flagID = flags.first?.id
+            setFlag(id, flagID: lastUsedFlagID ?? flags.first?.id)
         }
     }
 
@@ -323,11 +343,8 @@ final class DemoMailStore: MailStore {
             ),
         ]
 
-        flags = [
-            MailFlag(name: "Follow up", colorHex: "E07A3D"),
-            MailFlag(name: "Waiting", colorHex: "5B8DEF"),
-            MailFlag(name: "Urgent leaf", colorHex: "C43C3C"),
-        ]
+        flags = MailFlag.defaults
+        lastUsedFlagID = flags.first?.id
 
         var folderList: [MailFolder] = [
             MailFolder(id: approveFolderID, accountID: calliopeID, name: "Approve", kind: .approve, sortOrder: -2, isPinned: true, isSmart: true),

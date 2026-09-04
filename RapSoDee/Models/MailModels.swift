@@ -116,6 +116,17 @@ struct MailFlag: Identifiable, Hashable, Codable {
         self.name = name
         self.colorHex = colorHex
     }
+
+    /// Default named flags (Apple Mail–style palette). Editable in Settings.
+    static let defaults: [MailFlag] = [
+        MailFlag(name: "Red", colorHex: "E23B3B"),
+        MailFlag(name: "Orange", colorHex: "E07A3D"),
+        MailFlag(name: "Yellow", colorHex: "D4A017"),
+        MailFlag(name: "Green", colorHex: "1F8A5B"),
+        MailFlag(name: "Blue", colorHex: "3B7DD8"),
+        MailFlag(name: "Purple", colorHex: "7B5EA7"),
+        MailFlag(name: "Gray", colorHex: "8E8E93"),
+    ]
 }
 
 enum MessageDisposition: String, Codable, Hashable {

@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// Muse theme — warm paper + leaf-green accents. Playful, cute, almost professional. Never flirtatious.
 enum MuseTheme {
@@ -33,13 +36,13 @@ enum MuseTheme {
         return Color(hex: hex).opacity(opacity)
     }
 
-    /// Neutral selection for unflagged rows — light grey / near-white paper, never leaf-green.
+    /// Neutral selection for unflagged rows — noticeable light grey on white/paper, never leaf-green.
     static func selectionGrey(scheme: ColorScheme = .light) -> Color {
         if scheme == .dark {
-            return Color.white.opacity(0.14)
+            return Color.white.opacity(0.18)
         }
-        // Near-white paper with a clear light-grey lift
-        return Color(red: 0.89, green: 0.88, blue: 0.86)
+        // Clear light-grey highlight so focused/selected rows read against white paper.
+        return Color(red: 0.82, green: 0.81, blue: 0.79)
     }
 
     /// Even softer wash for reading-pane header chrome.
@@ -70,5 +73,19 @@ extension Color {
             blue: Double(b) / 255,
             opacity: Double(a) / 255
         )
+    }
+
+    /// Convert to RRGGBB hex for persistence (ColorPicker ↔ stored string).
+    func toHexString() -> String {
+#if os(macOS)
+        let ns = NSColor(self)
+        guard let rgb = ns.usingColorSpace(.sRGB) else { return "E07A3D" }
+        let r = Int(round(rgb.redComponent * 255))
+        let g = Int(round(rgb.greenComponent * 255))
+        let b = Int(round(rgb.blueComponent * 255))
+        return String(format: "%02X%02X%02X", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+#else
+        return "E07A3D"
+#endif
     }
 }

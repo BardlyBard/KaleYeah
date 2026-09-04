@@ -116,8 +116,23 @@ struct ReadingPaneView: View {
                 Button("Reply", action: onReply)
                 Button("Reply All", action: onReplyAll)
                 Button("Forward", action: onForward)
+                FlagToolbarMenu(
+                    flags: store.flags,
+                    currentFlagID: message.flagID,
+                    isFlagged: message.isFlagged,
+                    onSelect: { store.setFlag(message.id, flagID: $0) },
+                    onClear: { store.setFlag(message.id, flagID: nil) }
+                )
                 Menu("More") {
-                    Button("Flag") { store.toggleFlag(message.id, flagID: store.flags.first?.id) }
+                    Menu("Flag") {
+                        FlagMenuContent(
+                            flags: store.flags,
+                            currentFlagID: message.flagID,
+                            isFlagged: message.isFlagged,
+                            onSelect: { store.setFlag(message.id, flagID: $0) },
+                            onClear: { store.setFlag(message.id, flagID: nil) }
+                        )
+                    }
                     Button("Archive") { store.archive(message.id) }
                     if let suggest = store.suggestSmartFile(for: message) {
                         Button("Smart File → \(suggest.name)") {

@@ -8,7 +8,7 @@ struct SettingsView: View {
     @Query(sort: \PersistedFlag.sortOrder) private var persistedFlags: [PersistedFlag]
 
     @State private var newFlagName = ""
-    @State private var newFlagColor = "E07A3D"
+    @State private var newFlagColor = Color(hex: "E07A3D")
     @State private var vipText = ""
     @State private var notificationPolicy = "focusAware"
 
@@ -81,27 +81,60 @@ struct SettingsView: View {
 
                 Section("Named flags") {
                     ForEach(store.flags) { flag in
-                        HStack {
-                            Circle().fill(Color(hex: flag.colorHex)).frame(width: 12, height: 12)
-                            Text(flag.name)
-                            Spacer()
+                        HStack(spacing: 10) {
+                            Circle()
+                                .fill(Color(hex: liveFlag(flag.id)?.colorHex ?? flag.colorHex))
+                                .frame(width: 14, height: 14)
+                            TextField("Name", text: Binding(
+                                get: { liveFlag(flag.id)?.name ?? flag.name },
+                                set: { name in
+                                    guard var updated = liveFlag(flag.id) else { return }
+                                    updated.name = name
+                                    store.upsertFlag(updated)
+                                    syncFlagsToSwiftData()
+                                }
+                            ))
+                            ColorPicker(
+                                "Color",
+                                selection: Binding(
+                                    get: { Color(hex: liveFlag(flag.id)?.colorHex ?? flag.colorHex) },
+                                    set: { color in
+                                        guard var updated = liveFlag(flag.id) else { return }
+                                        updated.colorHex = color.toHexString()
+                                        store.upsertFlag(updated)
+                                        syncFlagsToSwiftData()
+                                    }
+                                ),
+                                supportsOpacity: false
+                            )
+                            .labelsHidden()
+                            .frame(width: 36)
                             Button("Remove", role: .destructive) {
                                 store.deleteFlag(flag.id)
                                 syncFlagsToSwiftData()
                             }
                         }
                     }
-                    HStack {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(newFlagColor)
+                            .frame(width: 14, height: 14)
                         TextField("Flag name", text: $newFlagName)
-                        TextField("Hex", text: $newFlagColor).frame(width: 80)
+                        ColorPicker("Color", selection: $newFlagColor, supportsOpacity: false)
+                            .labelsHidden()
+                            .frame(width: 36)
                         Button("Add") {
-                            guard !newFlagName.isEmpty else { return }
-                            let flag = MailFlag(name: newFlagName, colorHex: newFlagColor)
+                            guard !newFlagName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                            let flag = MailFlag(name: newFlagName.trimmingCharacters(in: .whitespacesAndNewlines), colorHex: newFlagColor.toHexString())
                             store.upsertFlag(flag)
                             newFlagName = ""
+                            newFlagColor = Color(hex: "E07A3D")
                             syncFlagsToSwiftData()
                         }
                     }
+                    Text("Choose a color with the picker — stored as hex under the hood.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("VIP (stub)") {
@@ -143,6 +176,10 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 560, minHeight: 480)
+    }
+
+    private func liveFlag(_ id: UUID) -> MailFlag? {
+        store.flags.first { $0.id == id }
     }
 
     private func moveAccount(_ id: UUID, _ delta: Int) {
@@ -199,6 +236,9 @@ struct SettingsView: View {
         }
         if !persistedFlags.isEmpty {
             store.flags = persistedFlags.map { MailFlag(id: $0.id, name: $0.name, colorHex: $0.colorHex) }
+        } else if store.flags.isEmpty {
+            store.flags = MailFlag.defaults
+            syncFlagsToSwiftData()
         }
     }
 }

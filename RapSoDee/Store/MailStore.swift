@@ -16,6 +16,8 @@ protocol MailStore: AnyObject {
 
     func markRead(_ id: UUID, read: Bool)
     func toggleFlag(_ id: UUID, flagID: UUID?)
+    func setFlag(_ id: UUID, flagID: UUID?)
+    func flagShortcut(_ id: UUID)
     func archive(_ id: UUID)
     func deleteRecessed(_ id: UUID)
     func file(_ id: UUID, into folderID: UUID)

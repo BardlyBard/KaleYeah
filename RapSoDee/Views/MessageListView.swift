@@ -24,7 +24,15 @@ struct MessageListView: View {
                         .tag(message.id)
                         .listRowBackground(rowBackground(for: message))
                         .contextMenu {
-                            Button("Flag") { store.toggleFlag(message.id, flagID: store.flags.first?.id) }
+                            Menu("Flag") {
+                                FlagMenuContent(
+                                    flags: store.flags,
+                                    currentFlagID: message.flagID,
+                                    isFlagged: message.isFlagged,
+                                    onSelect: { store.setFlag(message.id, flagID: $0) },
+                                    onClear: { store.setFlag(message.id, flagID: nil) }
+                                )
+                            }
                             Button("File…") { onFile(message) }
                             Button("Snooze…") { onSnooze(message) }
                             Button("Archive") { store.archive(message.id) }
@@ -103,7 +111,7 @@ struct MessageListView: View {
     private func rowBackground(for message: MailMessage) -> Color {
         let isSelected = selectedMessageID == message.id
 
-        // Selected + flagged: stronger flag color (clearer than soft wash).
+        // Flagged: soft flag wash; stronger when selected/focused.
         if message.isFlagged {
             let hex = flagHex(for: message)
             if isSelected {
@@ -112,16 +120,14 @@ struct MessageListView: View {
             return MuseTheme.flagWash(hex, scheme: colorScheme)
         }
 
-        // Selected + no flag: light grey — never leaf-green system accent.
+        // Unflagged + selected/focused: clear light grey (never leaf-green).
         if isSelected {
             return MuseTheme.selectionGrey(scheme: colorScheme)
         }
 
+        // Unflagged + not selected: white / paper — no grey or account tint wash.
         if message.disposition == .pendingApproval {
             return MuseTheme.approveSoft.opacity(0.45)
-        }
-        if let account = store.account(for: message.accountID) {
-            return MuseTheme.accountTint(account.tintHex)
         }
         return Color.clear
     }
