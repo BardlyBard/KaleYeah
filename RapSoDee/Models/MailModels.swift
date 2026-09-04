@@ -166,6 +166,8 @@ struct MailMessage: Identifiable, Hashable, Codable {
     var subject: String
     var snippet: String
     var body: String
+    /// True when `body` is HTML suitable for WKWebView rendering.
+    var isHTML: Bool
     var receivedAt: Date
     var isRead: Bool
     var isFlagged: Bool
@@ -187,6 +189,7 @@ struct MailMessage: Identifiable, Hashable, Codable {
         subject: String,
         snippet: String,
         body: String,
+        isHTML: Bool = false,
         receivedAt: Date = .now,
         isRead: Bool = false,
         isFlagged: Bool = false,
@@ -207,6 +210,7 @@ struct MailMessage: Identifiable, Hashable, Codable {
         self.subject = subject
         self.snippet = snippet
         self.body = body
+        self.isHTML = isHTML
         self.receivedAt = receivedAt
         self.isRead = isRead
         self.isFlagged = isFlagged

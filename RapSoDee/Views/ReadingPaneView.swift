@@ -16,21 +16,39 @@ struct ReadingPaneView: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.45)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if message.disposition == .pendingApproval {
-                        approveBanner
-                    }
-                    Text(message.body)
-                        .font(.body)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if !message.attachments.isEmpty {
+            if message.disposition == .pendingApproval {
+                approveBanner
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+            }
+            if message.isHTML {
+                HTMLMailWebView(html: message.body)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                if !message.attachments.isEmpty {
+                    ScrollView {
                         attachmentsSection
+                            .padding(20)
                     }
+                    .frame(maxHeight: 160)
                 }
-                .padding(20)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(message.body)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if !message.attachments.isEmpty {
+                            attachmentsSection
+                        }
+                    }
+                    .padding(20)
+                }
             }
         }
         .background(

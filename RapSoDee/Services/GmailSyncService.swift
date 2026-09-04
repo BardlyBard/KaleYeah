@@ -89,6 +89,7 @@ enum GmailSyncService {
                     subject: item.subject,
                     snippet: item.snippet,
                     body: item.body,
+                    isHTML: item.isHTML,
                     receivedAt: item.date,
                     isRead: item.isRead,
                     isFlagged: item.isFlagged,

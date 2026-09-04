@@ -26,7 +26,8 @@ struct IMAPFetchedMessage {
     var subject: String
     var date: Date
     var body: String
-    var snippet: String { String(body.replacingOccurrences(of: "\r\n", with: "\n").prefix(140)) }
+    var isHTML: Bool
+    var snippet: String
     var isRead: Bool { flags.contains { $0.uppercased() == "\\SEEN" } }
     var isFlagged: Bool { flags.contains { $0.uppercased() == "\\FLAGGED" } }
 }
@@ -87,7 +88,7 @@ actor SimpleIMAPClient {
         let start = max(1, exists - limit + 1)
         let set = "\(start):\(exists)"
         let lines = try await taggedLines(
-            "FETCH \(set) (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE)] BODY.PEEK[TEXT])",
+            "FETCH \(set) (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT])",
             allowLiterals: true
         )
         return parseFetch(lines)
@@ -209,7 +210,13 @@ actor SimpleIMAPClient {
             let cc = parseAddressList(headers["cc"] ?? "")
             let subject = decodeMIMEHeader(headers["subject"] ?? "(no subject)")
             let date = parseIMAPDate(headers["date"] ?? "") ?? Date()
-            let body = decodeQuotedPrintableIfNeeded(bodyText).trimmingCharacters(in: .whitespacesAndNewlines)
+            let parsed = MimeBodyParser.parse(
+                textBody: bodyText,
+                contentTypeHeader: headers["content-type"],
+                contentTransferEncoding: headers["content-transfer-encoding"]
+            )
+            let body = parsed.body.isEmpty ? subject : parsed.body
+            let snippet = parsed.snippet.isEmpty ? String(subject.prefix(140)) : parsed.snippet
             return IMAPFetchedMessage(
                 uid: uid,
                 flags: flags,
@@ -219,7 +226,9 @@ actor SimpleIMAPClient {
                 ccAddresses: cc,
                 subject: subject,
                 date: date,
-                body: body.isEmpty ? subject : body
+                body: body,
+                isHTML: parsed.isHTML && !parsed.body.isEmpty,
+                snippet: snippet
             )
         }
         .sorted { $0.date > $1.date }
@@ -330,14 +339,6 @@ actor SimpleIMAPClient {
         return String(data: data, encoding: .isoLatin1)
     }
 
-    private func decodeQuotedPrintableIfNeeded(_ text: String) -> String {
-        if text.contains("="),
-           let data = decodeQuotedPrintableData(text),
-           let s = String(data: data, encoding: .utf8) {
-            return s
-        }
-        return text.replacingOccurrences(of: "\r\n", with: "\n")
-    }
 
     private func decodeQuotedPrintableData(_ input: String) -> Data? {
         var out = Data()
