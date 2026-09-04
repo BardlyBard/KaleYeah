@@ -1,0 +1,427 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */; };
+		2E38EDF0247122E10ED00B41 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 011476096BD250F13FF78C8F /* SettingsView.swift */; };
+		407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36684E996FD0A65878AA7714 /* FilePickerSheet.swift */; };
+		557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */; };
+		5D3F06ABDEFE35BF6996AA4F /* SettingsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */; };
+		6746D15381E028C1AAB62B98 /* MailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50A04D0B1BCF71BFE83DDF62 /* MailStore.swift */; };
+		6C2A503C59A90FA8295F2F4E /* MuseTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B5DF663D1DAB5115A266044 /* MuseTheme.swift */; };
+		84749A185DB597F106310035 /* DemoMailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */; };
+		85A9A046D31C0C329CD61E35 /* ReadingPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */; };
+		A06737250A686C19726910AC /* RapSoDeeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */; };
+		A8E3DD59017D6E4B37F8DE04 /* KeyboardCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 790C971D69A2BA935411A556 /* KeyboardCommands.swift */; };
+		C8FA99B942BF2C51BD046893 /* MailboxLadderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */; };
+		CD80E90A36403943257098A6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */; };
+		DD7F161189C64E89C0E6CC78 /* SnoozeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */; };
+		EC4E203ACF0DB47B239085C2 /* MessageListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */; };
+		F85A6AD2705AE7373DD565C4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		011476096BD250F13FF78C8F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnoozeSheet.swift; sourceTree = "<group>"; };
+		338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		36684E996FD0A65878AA7714 /* FilePickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePickerSheet.swift; sourceTree = "<group>"; };
+		50A04D0B1BCF71BFE83DDF62 /* MailStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailStore.swift; sourceTree = "<group>"; };
+		52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingPaneView.swift; sourceTree = "<group>"; };
+		767E35312326B1E0245C31C1 /* RapSoDee.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RapSoDee.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		790C971D69A2BA935411A556 /* KeyboardCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardCommands.swift; sourceTree = "<group>"; };
+		7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeView.swift; sourceTree = "<group>"; };
+		8B5DF663D1DAB5115A266044 /* MuseTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MuseTheme.swift; sourceTree = "<group>"; };
+		9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
+		A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RapSoDeeApp.swift; sourceTree = "<group>"; };
+		B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModels.swift; sourceTree = "<group>"; };
+		B384989846962FDE099FEC67 /* RapSoDee.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RapSoDee.entitlements; sourceTree = "<group>"; };
+		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
+		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailboxLadderView.swift; sourceTree = "<group>"; };
+		FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoMailStore.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0F610B9998532E02337353CB /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		14D9B8621B065AD62AE3B163 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */,
+				D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */,
+				FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */,
+				9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */,
+				52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */,
+				011476096BD250F13FF78C8F /* SettingsView.swift */,
+				674421DEA7A6B630C1C7CE83 /* Components */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		260D0829D6BBDB32C7340974 /* RapSoDee */ = {
+			isa = PBXGroup;
+			children = (
+				B384989846962FDE099FEC67 /* RapSoDee.entitlements */,
+				A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */,
+				E286D44AF7DD99A295F726F0 /* Models */,
+				0F610B9998532E02337353CB /* Resources */,
+				B673C8EE12547E4AE2C3EB89 /* Store */,
+				F168BEC93346E19485397FA2 /* Theme */,
+				14D9B8621B065AD62AE3B163 /* Views */,
+			);
+			path = RapSoDee;
+			sourceTree = "<group>";
+		};
+		30E2752CB25751E2FD81856F = {
+			isa = PBXGroup;
+			children = (
+				260D0829D6BBDB32C7340974 /* RapSoDee */,
+				7F46196469DD69E18D179A56 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		674421DEA7A6B630C1C7CE83 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				36684E996FD0A65878AA7714 /* FilePickerSheet.swift */,
+				790C971D69A2BA935411A556 /* KeyboardCommands.swift */,
+				31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		7F46196469DD69E18D179A56 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				767E35312326B1E0245C31C1 /* RapSoDee.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B673C8EE12547E4AE2C3EB89 /* Store */ = {
+			isa = PBXGroup;
+			children = (
+				FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */,
+				50A04D0B1BCF71BFE83DDF62 /* MailStore.swift */,
+			);
+			path = Store;
+			sourceTree = "<group>";
+		};
+		E286D44AF7DD99A295F726F0 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */,
+				B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		F168BEC93346E19485397FA2 /* Theme */ = {
+			isa = PBXGroup;
+			children = (
+				8B5DF663D1DAB5115A266044 /* MuseTheme.swift */,
+			);
+			path = Theme;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CD682839166B400A50E3D18F /* RapSoDee */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 79991EEBA554ADC616300143 /* Build configuration list for PBXNativeTarget "RapSoDee" */;
+			buildPhases = (
+				8DD4F92407DBE4C82657FA61 /* Sources */,
+				744FECCBFC461610FEA5213E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RapSoDee;
+			packageProductDependencies = (
+			);
+			productName = RapSoDee;
+			productReference = 767E35312326B1E0245C31C1 /* RapSoDee.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		04F1626EF0BB7CCF536DD557 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					CD682839166B400A50E3D18F = {
+						DevelopmentTeam = 293476R5DQ;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = EE6E4240F0399D9E157B9B59 /* Build configuration list for PBXProject "RapSoDee" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 30E2752CB25751E2FD81856F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 7F46196469DD69E18D179A56 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CD682839166B400A50E3D18F /* RapSoDee */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		744FECCBFC461610FEA5213E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F85A6AD2705AE7373DD565C4 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8DD4F92407DBE4C82657FA61 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */,
+				CD80E90A36403943257098A6 /* ContentView.swift in Sources */,
+				84749A185DB597F106310035 /* DemoMailStore.swift in Sources */,
+				407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */,
+				A8E3DD59017D6E4B37F8DE04 /* KeyboardCommands.swift in Sources */,
+				557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */,
+				6746D15381E028C1AAB62B98 /* MailStore.swift in Sources */,
+				C8FA99B942BF2C51BD046893 /* MailboxLadderView.swift in Sources */,
+				EC4E203ACF0DB47B239085C2 /* MessageListView.swift in Sources */,
+				6C2A503C59A90FA8295F2F4E /* MuseTheme.swift in Sources */,
+				A06737250A686C19726910AC /* RapSoDeeApp.swift in Sources */,
+				85A9A046D31C0C329CD61E35 /* ReadingPaneView.swift in Sources */,
+				5D3F06ABDEFE35BF6996AA4F /* SettingsModels.swift in Sources */,
+				2E38EDF0247122E10ED00B41 /* SettingsView.swift in Sources */,
+				DD7F161189C64E89C0E6CC78 /* SnoozeSheet.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		2627FDC031198F48988C4E8D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RapSoDee/RapSoDee.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 293476R5DQ;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = RapSoDee;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © Kale Yeah!";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.rapsodee.mail;
+				PRODUCT_NAME = RapSoDee;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		52CCC47F6A7D467EC5F8ED0E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RapSoDee/RapSoDee.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 293476R5DQ;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = RapSoDee;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © Kale Yeah!";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.rapsodee.mail;
+				PRODUCT_NAME = RapSoDee;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A193CC1E2FBA694C10A2BEC2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		F644B1B22EE8B91AE13663E5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		79991EEBA554ADC616300143 /* Build configuration list for PBXNativeTarget "RapSoDee" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				52CCC47F6A7D467EC5F8ED0E /* Debug */,
+				2627FDC031198F48988C4E8D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EE6E4240F0399D9E157B9B59 /* Build configuration list for PBXProject "RapSoDee" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F644B1B22EE8B91AE13663E5 /* Debug */,
+				A193CC1E2FBA694C10A2BEC2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 04F1626EF0BB7CCF536DD557 /* Project object */;
+}
