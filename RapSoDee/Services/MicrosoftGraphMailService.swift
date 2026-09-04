@@ -81,19 +81,73 @@ enum MicrosoftGraphMailService {
 
     // MARK: - Send
 
+    /// Sends via Graph. Uses mailbox identity of the signed-in `/me` user (do not spoof `from`
+    /// unless Send As is required). Replies with a Graph `remoteID` use createReply/createReplyAll
+    /// so conversation / In-Reply-To headers stay correct; otherwise `/me/sendMail`.
+    /// Returns a short status line for the UI (no message body).
+    @discardableResult
     static func sendMail(
         accessToken: String,
         draft: ComposeDraft,
         fromEmail: String,
+        mailboxEmail: String,
         signature: String?
-    ) async throws {
+    ) async throws -> String {
         var bodyText = draft.body
         if let signature, !signature.isEmpty, !bodyText.contains(signature) {
             bodyText += "\n\n--\n" + signature
         }
-        let to = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let cc = draft.cc.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let to = parseAddressList(draft.to)
+        let cc = parseAddressList(draft.cc)
         guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
+
+        let mailbox = mailboxEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedFrom = fromEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only set `from` when the compose From matches the signed-in mailbox (or is empty).
+        // A mismatched From requires Send As and can look like spoofing to outbound filters.
+        let fromMatchesMailbox = requestedFrom.isEmpty
+            || requestedFrom.caseInsensitiveCompare(mailbox) == .orderedSame
+
+        if case .reply(let original) = draft.mode,
+           let remoteID = original.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !remoteID.isEmpty {
+            try await sendReplyViaCreateReply(
+                accessToken: accessToken,
+                originalGraphID: remoteID,
+                replyAll: false,
+                subject: draft.subject,
+                bodyText: bodyText,
+                to: to,
+                cc: cc,
+                attachments: draft.attachments
+            )
+            return sendStatusSummary(
+                path: "createReply→send",
+                mailbox: mailbox,
+                to: to,
+                attachmentCount: draft.attachments.count
+            )
+        }
+        if case .replyAll(let original) = draft.mode,
+           let remoteID = original.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !remoteID.isEmpty {
+            try await sendReplyViaCreateReply(
+                accessToken: accessToken,
+                originalGraphID: remoteID,
+                replyAll: true,
+                subject: draft.subject,
+                bodyText: bodyText,
+                to: to,
+                cc: cc,
+                attachments: draft.attachments
+            )
+            return sendStatusSummary(
+                path: "createReplyAll→send",
+                mailbox: mailbox,
+                to: to,
+                attachmentCount: draft.attachments.count
+            )
+        }
 
         var messageObj: [String: Any] = [
             "subject": draft.subject,
@@ -101,31 +155,124 @@ enum MicrosoftGraphMailService {
                 "contentType": "Text",
                 "content": bodyText,
             ],
-            "toRecipients": to.map { ["emailAddress": ["address": $0]] },
-            "ccRecipients": cc.map { ["emailAddress": ["address": $0]] },
-            "from": ["emailAddress": ["address": fromEmail]],
+            "toRecipients": recipientObjects(to),
+            "ccRecipients": recipientObjects(cc),
         ]
-        if !draft.attachments.isEmpty {
-            var graphAttachments: [[String: Any]] = []
-            for att in draft.attachments {
-                guard let data = AttachmentStore.load(path: att.localPath) else { continue }
-                graphAttachments.append([
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": att.filename,
-                    "contentType": att.mimeType,
-                    "contentBytes": data.base64EncodedString(),
-                ])
-            }
-            if !graphAttachments.isEmpty {
-                messageObj["attachments"] = graphAttachments
-            }
+        if fromMatchesMailbox {
+            // Omit `from` — Graph sends as the `/me` mailbox (correct DKIM/alignment).
+        } else {
+            // Explicit Send As attempt; Graph will 403 if the mailbox lacks permission.
+            messageObj["from"] = ["emailAddress": ["address": requestedFrom]]
+        }
+        if let headers = replyInternetMessageHeaders(for: draft) {
+            messageObj["internetMessageHeaders"] = headers
+        }
+        if let graphAttachments = fileAttachmentObjects(draft.attachments), !graphAttachments.isEmpty {
+            messageObj["attachments"] = graphAttachments
         }
         let payload: [String: Any] = [
             "message": messageObj,
             "saveToSentItems": true,
         ]
-
         try await postJSON(path: "/me/sendMail", accessToken: accessToken, body: payload)
+        return sendStatusSummary(
+            path: "sendMail",
+            mailbox: mailbox.isEmpty ? requestedFrom : mailbox,
+            to: to,
+            attachmentCount: draft.attachments.count
+        )
+    }
+
+    private static func sendReplyViaCreateReply(
+        accessToken: String,
+        originalGraphID: String,
+        replyAll: Bool,
+        subject: String,
+        bodyText: String,
+        to: [String],
+        cc: [String],
+        attachments: [ComposeAttachment]
+    ) async throws {
+        let encodedID = originalGraphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? originalGraphID
+        let createPath = replyAll
+            ? "/me/messages/\(encodedID)/createReplyAll"
+            : "/me/messages/\(encodedID)/createReply"
+        let createdData = try await postJSON(path: createPath, accessToken: accessToken, body: [:])
+        struct CreatedDraft: Decodable { var id: String? }
+        let created = try JSONDecoder().decode(CreatedDraft.self, from: createdData)
+        guard let draftID = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !draftID.isEmpty else {
+            throw GraphError.unexpected("Graph createReply returned no draft id")
+        }
+        let encodedDraft = draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID
+        let patch: [String: Any] = [
+            "subject": subject,
+            "body": [
+                "contentType": "Text",
+                "content": bodyText,
+            ],
+            "toRecipients": recipientObjects(to),
+            "ccRecipients": recipientObjects(cc),
+        ]
+        try await patchJSON(path: "/me/messages/\(encodedDraft)", accessToken: accessToken, body: patch)
+        if let graphAttachments = fileAttachmentObjects(attachments) {
+            for att in graphAttachments {
+                _ = try await postJSON(
+                    path: "/me/messages/\(encodedDraft)/attachments",
+                    accessToken: accessToken,
+                    body: att
+                )
+            }
+        }
+        _ = try await postJSON(path: "/me/messages/\(encodedDraft)/send", accessToken: accessToken, body: [:])
+    }
+
+    private static func replyInternetMessageHeaders(for draft: ComposeDraft) -> [[String: String]]? {
+        let messageIDRaw: String?
+        if case .reply(let m) = draft.mode {
+            messageIDRaw = m.internetMessageId
+        } else if case .replyAll(let m) = draft.mode {
+            messageIDRaw = m.internetMessageId
+        } else {
+            return nil
+        }
+        guard let messageID = messageIDRaw?.trimmingCharacters(in: .whitespacesAndNewlines), !messageID.isEmpty else {
+            return nil
+        }
+        // Best-effort threading when createReply is unavailable (no Graph remoteID).
+        return [
+            ["name": "In-Reply-To", "value": messageID],
+            ["name": "References", "value": messageID],
+        ]
+    }
+
+    private static func parseAddressList(_ raw: String) -> [String] {
+        raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    private static func recipientObjects(_ addresses: [String]) -> [[String: Any]] {
+        addresses.map { ["emailAddress": ["address": $0]] }
+    }
+
+    private static func fileAttachmentObjects(_ attachments: [ComposeAttachment]) -> [[String: Any]]? {
+        guard !attachments.isEmpty else { return nil }
+        var graphAttachments: [[String: Any]] = []
+        for att in attachments {
+            guard let data = AttachmentStore.load(path: att.localPath) else { continue }
+            graphAttachments.append([
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": att.filename,
+                "contentType": att.mimeType.isEmpty ? "application/octet-stream" : att.mimeType,
+                "contentBytes": data.base64EncodedString(),
+            ])
+        }
+        return graphAttachments.isEmpty ? nil : graphAttachments
+    }
+
+    private static func sendStatusSummary(path: String, mailbox: String, to: [String], attachmentCount: Int) -> String {
+        let toPreview = to.prefix(3).joined(separator: ", ")
+        let more = to.count > 3 ? " +\(to.count - 3)" : ""
+        let att = attachmentCount > 0 ? ", \(attachmentCount) attachment(s)" : ""
+        return "Sent via Graph (\(path)) as \(mailbox) → \(toPreview)\(more)\(att)"
     }
 
     // MARK: - Internals
@@ -329,12 +476,25 @@ enum MicrosoftGraphMailService {
         }
     }
 
-    private static func postJSON(path: String, accessToken: String, body: [String: Any]) async throws {
+    @discardableResult
+    private static func postJSON(path: String, accessToken: String, body: [String: Any]) async throws -> Data {
+        try await sendJSON(method: "POST", path: path, accessToken: accessToken, body: body)
+    }
+
+    @discardableResult
+    private static func patchJSON(path: String, accessToken: String, body: [String: Any]) async throws -> Data {
+        try await sendJSON(method: "PATCH", path: path, accessToken: accessToken, body: body)
+    }
+
+    private static func sendJSON(method: String, path: String, accessToken: String, body: [String: Any]) async throws -> Data {
         let url = try makeURL(path: path, query: [:])
-        var request = URLRequest(url: url, timeoutInterval: 30)
-        request.httpMethod = "POST"
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.httpMethod = method
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("IdType=\"ImmutableId\"", forHTTPHeaderField: "Prefer")
+        // Empty body (e.g. createReply / send) still needs a JSON object for Graph.
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let data: Data
@@ -345,6 +505,7 @@ enum MicrosoftGraphMailService {
             throw mapSessionError(error)
         }
         try throwIfNeeded(response: response, data: data)
+        return data
     }
 
     private static func throwIfNeeded(response: URLResponse, data: Data) throws {
@@ -355,6 +516,26 @@ enum MicrosoftGraphMailService {
         }
     }
 
+    /// Pull Graph `error.message` / `code` for UI; never include mail body.
+    static func summarizeGraphErrorBody(_ body: String) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "(no error body)" }
+        if let data = trimmed.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let err = obj["error"] as? [String: Any]
+            let code = (err?["code"] as? String) ?? (obj["code"] as? String)
+            let message = (err?["message"] as? String) ?? (obj["message"] as? String)
+            var parts: [String] = []
+            if let code, !code.isEmpty { parts.append(code) }
+            if let message, !message.isEmpty { parts.append(message) }
+            if !parts.isEmpty {
+                let joined = parts.joined(separator: " — ")
+                return String(joined.prefix(400))
+            }
+        }
+        return String(trimmed.prefix(400))
+    }
+
     enum GraphError: LocalizedError {
         case unexpected(String)
         case http(Int, String)
@@ -363,8 +544,7 @@ enum MicrosoftGraphMailService {
             switch self {
             case .unexpected(let s): return s
             case .http(let code, let body):
-                if body.count < 500 { return "Graph HTTP \(code): \(body)" }
-                return "Graph HTTP \(code)"
+                return "Graph HTTP \(code): \(MicrosoftGraphMailService.summarizeGraphErrorBody(body))"
             case .timedOut(let s): return s
             }
         }

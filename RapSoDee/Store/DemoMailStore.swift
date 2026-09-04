@@ -983,25 +983,32 @@ final class DemoMailStore: MailStore {
         }
         office365IsSyncing = true
         office365SyncStartedAt = Date()
-        office365SyncStatus = "Sending…"
+        let toPreview = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(2).joined(separator: ", ")
+        office365SyncStatus = "Sending via Graph as \(account.email) → \(toPreview)…"
+        office365LastError = nil
         defer {
             office365IsSyncing = false
             office365SyncStartedAt = nil
         }
         do {
             let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
-            try await MicrosoftGraphMailService.sendMail(
+            let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
+            let status = try await MicrosoftGraphMailService.sendMail(
                 accessToken: token,
                 draft: draft,
-                fromEmail: draft.fromAddress.isEmpty ? account.email : draft.fromAddress,
+                fromEmail: fromEmail,
+                mailboxEmail: account.email,
                 signature: account.signature
             )
             insertLocalSent(draft)
-            office365SyncStatus = "Sent via Microsoft Graph"
+            office365SyncStatus = status
             office365LastError = nil
         } catch {
-            office365LastError = error.localizedDescription
-            office365SyncStatus = "Send failed"
+            let detail = error.localizedDescription
+            office365LastError = detail
+            // Put Graph 4xx/5xx text in the status line so it is visible without digging.
+            let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
+            office365SyncStatus = "Send failed — \(short)"
         }
     }
 
