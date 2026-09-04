@@ -17,6 +17,20 @@ enum MuseTheme {
     static func accountTint(_ hex: String) -> Color {
         Color(hex: hex).opacity(0.14)
     }
+
+    /// Soft pastel wash from a user-named flag color. Stronger than account tint so
+    /// flag rows read clearly, but muted enough that list text stays readable in
+    /// light and dark appearances.
+    static func flagWash(_ hex: String, scheme: ColorScheme = .light) -> Color {
+        let opacity = scheme == .dark ? 0.30 : 0.22
+        return Color(hex: hex).opacity(opacity)
+    }
+
+    /// Even softer wash for reading-pane header chrome.
+    static func flagHeaderWash(_ hex: String, scheme: ColorScheme = .light) -> Color {
+        let opacity = scheme == .dark ? 0.22 : 0.14
+        return Color(hex: hex).opacity(opacity)
+    }
 }
 
 extension Color {

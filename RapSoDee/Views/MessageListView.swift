@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MessageListView: View {
     @Environment(DemoMailStore.self) private var store
+    @Environment(\.colorScheme) private var colorScheme
     let selection: LadderSelection
     @Binding var selectedMessageID: MailMessage.ID?
     var onFile: (MailMessage) -> Void
@@ -84,6 +85,18 @@ struct MessageListView: View {
     }
 
     private func rowBackground(for message: MailMessage) -> Color {
+        // Flag wash dominates over account tint / approve soft so flagged mail is obvious.
+        if message.isFlagged {
+            let hex: String
+            if let id = message.flagID, let flag = store.flags.first(where: { $0.id == id }) {
+                hex = flag.colorHex
+            } else if let first = store.flags.first {
+                hex = first.colorHex
+            } else {
+                hex = "E07A3D"
+            }
+            return MuseTheme.flagWash(hex, scheme: colorScheme)
+        }
         if message.disposition == .pendingApproval {
             return MuseTheme.approveSoft.opacity(0.45)
         }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReadingPaneView: View {
     @Environment(DemoMailStore.self) private var store
+    @Environment(\.colorScheme) private var colorScheme
     let message: MailMessage
     var onReply: () -> Void
     var onReplyAll: () -> Void
@@ -83,6 +84,20 @@ struct ReadingPaneView: View {
             }
         }
         .padding(16)
+        .background(headerFlagWash)
+    }
+
+    private var headerFlagWash: Color {
+        guard message.isFlagged else { return Color.clear }
+        let hex: String
+        if let id = message.flagID, let flag = store.flags.first(where: { $0.id == id }) {
+            hex = flag.colorHex
+        } else if let first = store.flags.first {
+            hex = first.colorHex
+        } else {
+            hex = "E07A3D"
+        }
+        return MuseTheme.flagHeaderWash(hex, scheme: colorScheme)
     }
 
     private var actionButtons: some View {
