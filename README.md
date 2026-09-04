@@ -5,7 +5,7 @@ Native **SwiftUI macOS** mail client for Kale Yeah! — muse theme (warm paper +
 Companion names (README only): lists app **Strophe**, schedule leaning **Tempo**. Related checklist app: [Calliope Lists](../calliope-lists) (separate repo).
 
 **Bundle ID:** `local.rapsodee.mail`  
-**Stage 1+:** Demo / mock mail store **plus optional live IMAP accounts** — Gmail and Microsoft 365 / GoDaddy Email Essentials (IMAP fetch + SMTP send). Passwords live in **macOS Keychain only** — never in source, git, or chat logs.
+**Stage 1+:** Demo / mock mail store **plus optional live accounts** — Gmail (IMAP/SMTP App Password) and Microsoft 365 (MSAL + Graph). Secrets live in **macOS Keychain / MSAL cache only** — never in source, git, or chat logs.
 
 ## Open & run
 
@@ -26,7 +26,7 @@ Companion names (README only): lists app **Strophe**, schedule leaning **Tempo**
 6. Destination: **My Mac**.
 7. Press **Run** (⌘R).
 
-On first launch the demo store seeds two human accounts plus **Calliope**, folders, flags, and sample mail. Live Gmail and Microsoft 365 are optional — without Keychain credentials the UI stays demo-only.
+On first launch the demo store seeds two human accounts plus **Calliope**, folders, flags, and sample mail. Live Gmail and Microsoft 365 are optional — without Gmail Keychain credentials / Microsoft sign-in the UI stays demo-only.
 
 ### CLI build (optional)
 
@@ -51,20 +51,50 @@ xcodebuild -scheme RapSoDee -destination 'platform=macOS' -configuration Debug -
 
 IMAP: `imap.gmail.com:993` (SSL). SMTP: `smtp.gmail.com:465` (SSL). Recent messages (≈50) from Inbox / Sent / Drafts when listable. Flags / file / snooze stay local-first for the live account.
 
-## Connect Kale Yeah Microsoft 365 (GoDaddy Email Essentials)
+## Connect Kale Yeah Microsoft 365 (MSAL + Graph)
 
-**Never commit or chat the mailbox password.** RapSoDee stores it only in the macOS Keychain.
+Microsoft has **disabled basic IMAP/SMTP password auth** for many tenants (`A0001 NO Basic authentication is disabled`). RapSoDee uses **MSAL (public client)** + **Microsoft Graph** instead — no client secret, tokens in the macOS Keychain via MSAL.
 
-1. Use the GoDaddy / Microsoft 365 mailbox password for `derek.brown@kaleyeahinspections.com` (the same password you use for Outlook web / mail apps — not a Google App Password).
-2. In RapSoDee: **Settings → Accounts — Microsoft 365**
-   - Email defaults to `derek.brown@kaleyeahinspections.com` (editable).
-   - Enter the **mailbox password** in the secure field.
-   - Tap **Add Microsoft 365** / **Save Password**, then **Test connection** and **Sync now**.
-3. Toggle **include in Unified Inbox** under *Unified Inbox — per-account toggles* if you want Kale Yeah mail mixed with Gmail.
-4. Replies use **deliveredTo** (the Kale Yeah address) as From when you reply to an M365 message.
-5. On later launches, if Keychain still has the password, RapSoDee syncs this account alongside Gmail.
+### Exact redirect URI (register this in Entra)
 
-IMAP: `outlook.office365.com:993` (SSL). SMTP: `smtp.office365.com:587` (STARTTLS; falls back to 465 if needed). Username is the full email address. HTML MIME rendering is shared with Gmail.
+```
+msauth.local.rapsodee.mail://auth
+```
+
+Bundle ID: `local.rapsodee.mail` → URL scheme `msauth.local.rapsodee.mail`.
+
+### Where to paste the Application (client) ID
+
+1. **Default client ID** (public client, no secret): `3f7dfcbe-daee-4902-a5db-cc779ad45c4b` — baked into `MSALAppConfig.defaultClientID` and Info.plist `MSALClientID`.
+2. **Override without rebuild:** Settings → Microsoft 365 → **Application (client) ID** (UserDefaults `rapSoDee.msal.clientID`).
+
+### Entra app registration steps
+
+1. Open [Microsoft Entra admin center](https://entra.microsoft.com) → **App registrations** → **New registration**.
+2. Name e.g. `RapSoDee`.
+3. **Supported account types:** Accounts in this organizational directory only (single tenant) *or* any org directory if you need broader sign-in. For GoDaddy / Kale Yeah M365, single-tenant for your directory is typical.
+4. Click **Register**. Copy the **Application (client) ID**.
+5. **Authentication** → **Add a platform** → **Mobile and desktop applications** (public client).
+6. Add redirect URI: `msauth.local.rapsodee.mail://auth` → Save.
+7. Under **Authentication**, enable **Allow public client flows** = **Yes** (no client secret).
+8. **API permissions** → Microsoft Graph → **Delegated**:
+   - `Mail.Read`
+   - `Mail.ReadWrite`
+   - `Mail.Send`
+   - `User.Read`
+   - (MSAL also requests `offline_access` for refresh tokens)
+9. Click **Grant admin consent** for the tenant if you are an admin (recommended for Kale Yeah).
+10. In RapSoDee Settings → paste the client ID → **Sign in with Microsoft** (prefer `derek.brown@kaleyeahinspections.com`) → **Sync now**.
+
+Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read offline_access`.
+
+### Behaviour
+
+- **Sign in / Sign out / Sync** in Settings; signed-in account shown.
+- Graph lists recent Inbox + Sent; HTML bodies map into the existing reading pane.
+- Compose / reply send via Graph `sendMail`.
+- Gmail App Password path is unchanged.
+- Basic M365 password UI is removed (basic auth is disabled).
 
 ## Project layout
 
@@ -75,7 +105,7 @@ RapSoDee/
   Models/                    # Mail + SwiftData settings models
   Store/MailStore.swift      # Protocol for future IMAP/Exchange/Graph
   Store/DemoMailStore.swift  # Demo store + hybrid live Gmail / M365 merge
-  Services/                  # Keychain, IMAP/SMTP, shared IMAP connector (Gmail + Office 365)
+  Services/                  # Keychain, IMAP/SMTP (Gmail), MSAL + Graph (Microsoft 365)
   Views/                     # 3-pane UI, compose, settings, sheets
 project.yml                  # XcodeGen spec
 ```
@@ -84,8 +114,8 @@ project.yml                  # XcodeGen spec
 
 | Stage 1 (this repo) | Later |
 |---------------------|--------|
-| 3-pane: ladder \| flat list (no threading) \| reading/compose | Broader providers (Exchange / Graph / OAuth) |
-| Demo multi-account + optional live Gmail + Microsoft 365 | OAuth / Graph / more providers |
+| 3-pane: ladder \| flat list (no threading) \| reading/compose | More providers / richer Graph features |
+| Demo multi-account + optional live Gmail + M365 (MSAL/Graph) | More providers / richer Graph |
 | Always-on search (from/subject/snippet) | Full-body server search |
 | Unified Inbox with per-account Settings toggles | Rules engine |
 | Approve mailbox for Calliope drafts (edit / Approve&Send / Reject) | Calliope agent pipeline |
@@ -105,7 +135,7 @@ project.yml                  # XcodeGen spec
 
 - Follows **system appearance** (light/dark).
 - Soft per-account row tints; Approve uses a loud but friendly accent; live Gmail uses Google-red tint; Microsoft 365 uses Outlook-blue tint.
-- `MailStore` is the seam for backends — Stage 1 ships `DemoMailStore` with optional Gmail + Microsoft 365 IMAP/SMTP.
+- `MailStore` is the seam for backends — Stage 1 ships `DemoMailStore` with optional Gmail IMAP/SMTP + Microsoft 365 MSAL/Graph.
 
 ## Regenerate Xcode project
 

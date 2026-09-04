@@ -10,6 +10,10 @@ settings:
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+packages:
+  MSAL:
+    url: https://github.com/AzureAD/microsoft-authentication-library-for-objc
+    from: "2.0.0"
 targets:
   RapSoDee:
     type: application
@@ -25,10 +29,14 @@ targets:
       - path: RapSoDee/Resources/Sounds
         buildPhase: resources
         type: folder
+    dependencies:
+      - package: MSAL
+        product: MSAL
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.rapsodee.mail
         PRODUCT_NAME: RapSoDee
+        INFOPLIST_FILE: RapSoDee/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: RapSoDee
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © Kale Yeah!"
@@ -46,3 +54,5 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.network.client: true
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.microsoft.identity.universalstorage

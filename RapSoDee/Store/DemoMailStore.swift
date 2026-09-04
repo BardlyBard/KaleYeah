@@ -41,7 +41,7 @@ final class DemoMailStore: MailStore {
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
-        office365NeedsSetup = !Office365SyncService.hasKeychainCredentials(email: office365Account()?.email)
+        office365NeedsSetup = MSALAppConfig.rememberedSignedInEmail == nil
     }
 
     func account(for id: UUID) -> MailAccount? { accounts.first { $0.id == id } }
@@ -586,13 +586,16 @@ final class DemoMailStore: MailStore {
                 gmailSyncStatus = "Demo accounts ready. Add Gmail App Password in Settings → Accounts."
             }
         }
-        if let account = office365Account(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
+        await MSALAuthService.shared.refreshSignedInStateFromCache()
+        let msalSignedIn = await MainActor.run { MSALAuthService.shared.isSignedIn }
+        if msalSignedIn || MSALAppConfig.rememberedSignedInEmail != nil {
+            restoreOffice365AccountShellIfNeeded()
             office365NeedsSetup = false
             await syncOffice365Now()
         } else {
             office365NeedsSetup = true
             if office365SyncStatus.isEmpty {
-                office365SyncStatus = "Optional: add Microsoft 365 in Settings → Accounts."
+                office365SyncStatus = "Optional: Sign in with Microsoft in Settings → Microsoft 365."
             }
         }
     }
@@ -638,7 +641,7 @@ final class DemoMailStore: MailStore {
     }
 
 
-    // MARK: - Live Microsoft 365
+    // MARK: - Live Microsoft 365 (MSAL + Graph)
 
     func office365Account() -> MailAccount? {
         accounts.first { $0.isLiveOffice365 }
@@ -646,11 +649,13 @@ final class DemoMailStore: MailStore {
 
     func restoreOffice365AccountShellIfNeeded() {
         if office365Account() != nil { return }
-        let email = Office365SyncService.storedEmail() ?? Office365Defaults.defaultEmail
+        let email = MSALAppConfig.rememberedSignedInEmail
+            ?? Office365SyncService.storedEmail()
+            ?? Office365Defaults.defaultEmail
         let id = Office365SyncService.storedAccountID() ?? UUID()
-        let hasCreds = KeychainCredentialStore.hasCredentials(forEmail: email)
+        let signedIn = MSALAppConfig.rememberedSignedInEmail != nil
         let remembered = Office365SyncService.storedEmail() != nil
-        guard hasCreds || remembered else { return }
+        guard signedIn || remembered else { return }
         ensureOffice365Account(email: email, id: id)
     }
 
@@ -678,7 +683,6 @@ final class DemoMailStore: MailStore {
             isLiveGmail: false,
             isLiveOffice365: true
         )
-        // Place after live Gmail if present, else at front.
         if let gmailIdx = accounts.firstIndex(where: { $0.isLiveGmail }) {
             accounts.insert(account, at: gmailIdx + 1)
         } else {
@@ -699,7 +703,11 @@ final class DemoMailStore: MailStore {
     }
 
     func removeOffice365Account() {
-        guard let account = office365Account() else { return }
+        guard let account = office365Account() else {
+            Task { @MainActor in await MSALAuthService.shared.signOut() }
+            office365NeedsSetup = true
+            return
+        }
         KeychainCredentialStore.deletePassword(forEmail: account.email)
         Office365SyncService.clearRememberedAccount()
         messages.removeAll { $0.accountID == account.id }
@@ -708,64 +716,77 @@ final class DemoMailStore: MailStore {
         for (idx, _) in accounts.enumerated() {
             accounts[idx].sortOrder = idx
         }
+        Task { @MainActor in await MSALAuthService.shared.signOut() }
         office365NeedsSetup = true
-        office365SyncStatus = "Microsoft 365 account removed — Gmail and demo mail still available."
+        office365SyncStatus = "Signed out of Microsoft 365 — Gmail and demo mail still available."
         office365LastError = nil
     }
 
-    func saveOffice365Credentials(email: String, password: String) throws {
-        let cleaned = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        let pass = password.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, !pass.isEmpty else {
-            throw MailNetError.unexpected("Email and mailbox password are required")
+    /// Interactive MSAL sign-in, then Graph sync.
+    func signInMicrosoft365(clientIDOverride: String? = nil) async {
+        if let override = clientIDOverride {
+            MSALAppConfig.setClientIDOverride(override)
         }
-        try KeychainCredentialStore.savePassword(pass, forEmail: cleaned)
-        _ = ensureOffice365Account(email: cleaned, id: Office365SyncService.storedAccountID() ?? UUID())
-        office365NeedsSetup = false
-        office365SyncStatus = "Credentials saved in Keychain."
-        office365LastError = nil
-    }
-
-    func testOffice365Connection(email overrideEmail: String? = nil, password overridePassword: String? = nil) async {
-        let email = (overrideEmail ?? office365Account()?.email ?? Office365SyncService.storedEmail() ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !email.isEmpty else {
-            office365LastError = "Enter a Microsoft 365 address"
-            return
-        }
-        let fieldPass = (overridePassword ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let password: String
-        if !fieldPass.isEmpty {
-            password = fieldPass
-        } else if let stored = KeychainCredentialStore.password(forEmail: email) {
-            password = stored
-        } else {
-            office365LastError = "Enter a mailbox password or save credentials first"
+        guard !MSALAppConfig.clientID.isEmpty else {
+            office365LastError = MSALAuthError.missingClientID.localizedDescription
             office365NeedsSetup = true
             return
         }
         office365IsSyncing = true
         office365LastError = nil
-        office365SyncStatus = "Testing connection…"
+        office365SyncStatus = "Signing in with Microsoft…"
         do {
-            try await Office365SyncService.testConnection(email: email, password: password)
-            office365SyncStatus = "Connection OK (IMAP + SMTP)"
+            _ = try await MSALAuthService.shared.signIn(loginHint: Office365Defaults.defaultEmail)
+            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
+            office365NeedsSetup = false
+            office365SyncStatus = "Signed in as \(email)"
+            office365IsSyncing = false
+            await syncOffice365Now()
         } catch {
             office365LastError = error.localizedDescription
-            office365SyncStatus = "Connection failed"
+            office365SyncStatus = "Sign-in failed"
+            office365IsSyncing = false
         }
+    }
+
+    func signOutMicrosoft365() async {
+        office365IsSyncing = true
+        office365SyncStatus = "Signing out…"
+        await MSALAuthService.shared.signOut()
+        if let account = office365Account() {
+            KeychainCredentialStore.deletePassword(forEmail: account.email)
+            messages.removeAll { $0.accountID == account.id }
+            folders.removeAll { $0.accountID == account.id }
+            accounts.removeAll { $0.id == account.id }
+            for (idx, _) in accounts.enumerated() {
+                accounts[idx].sortOrder = idx
+            }
+        }
+        Office365SyncService.clearRememberedAccount()
+        office365NeedsSetup = true
+        office365SyncStatus = "Signed out of Microsoft 365."
+        office365LastError = nil
         office365IsSyncing = false
     }
 
     func syncOffice365Now() async {
+        restoreOffice365AccountShellIfNeeded()
+        if office365Account() == nil {
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+                _ = ensureOffice365Account(email: email)
+            } catch {
+                office365NeedsSetup = true
+                office365SyncStatus = "Sign in with Microsoft in Settings → Microsoft 365"
+                return
+            }
+        }
         guard let account = office365Account() else {
             office365NeedsSetup = true
-            office365SyncStatus = "Add Microsoft 365 in Settings → Accounts"
-            return
-        }
-        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
-            office365NeedsSetup = true
-            office365SyncStatus = "Enter mailbox password in Settings"
+            office365SyncStatus = "Sign in with Microsoft in Settings → Microsoft 365"
             return
         }
         guard let folderIDs = liveFolderIDs(for: account.id) else {
@@ -774,14 +795,19 @@ final class DemoMailStore: MailStore {
         }
         office365IsSyncing = true
         office365LastError = nil
-        office365SyncStatus = "Syncing Microsoft 365…"
+        office365SyncStatus = "Syncing Microsoft 365 via Graph…"
         let previousIDs = Set(messages.filter { $0.accountID == account.id }.map(\.id))
         do {
-            let (fetched, _, result) = try await Office365SyncService.sync(
-                email: account.email,
-                password: password,
+            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
+            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            if email.lowercased() != account.email.lowercased() {
+                _ = ensureOffice365Account(email: email, id: account.id)
+            }
+            let (fetched, result) = try await MicrosoftGraphMailService.sync(
+                accessToken: token,
                 accountID: account.id,
-                folderIDs: folderIDs
+                folderIDs: folderIDs,
+                accountEmail: email
             )
             var flagMemory: [UUID: (Bool, UUID?)] = [:]
             for m in messages where m.accountID == account.id {
@@ -808,6 +834,10 @@ final class DemoMailStore: MailStore {
         } catch {
             office365LastError = error.localizedDescription
             office365SyncStatus = "Sync failed"
+            if error.localizedDescription.lowercased().contains("not signed")
+                || error.localizedDescription.lowercased().contains("client id") {
+                office365NeedsSetup = true
+            }
         }
         office365IsSyncing = false
     }
@@ -817,22 +847,18 @@ final class DemoMailStore: MailStore {
             insertLocalSent(draft)
             return
         }
-        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
-            office365LastError = "Missing mailbox password — open Settings → Accounts"
-            office365NeedsSetup = true
-            return
-        }
         office365IsSyncing = true
         office365SyncStatus = "Sending…"
         do {
-            try await Office365SyncService.send(
-                email: account.email,
-                password: password,
+            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
+            try await MicrosoftGraphMailService.sendMail(
+                accessToken: token,
                 draft: draft,
+                fromEmail: draft.fromAddress.isEmpty ? account.email : draft.fromAddress,
                 signature: account.signature
             )
             insertLocalSent(draft)
-            office365SyncStatus = "Sent via Microsoft 365 SMTP"
+            office365SyncStatus = "Sent via Microsoft Graph"
             office365LastError = nil
         } catch {
             office365LastError = error.localizedDescription

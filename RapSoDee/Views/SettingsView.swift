@@ -16,10 +16,8 @@ struct SettingsView: View {
     @State private var gmailSecureFieldID = UUID()
     @State private var gmailBusy = false
 
-    @State private var office365Email = Office365Defaults.defaultEmail
-    @State private var office365Password = ""
-    @State private var office365SecureFieldID = UUID()
     @State private var office365Busy = false
+    @State private var msalClientID = MSALAppConfig.clientID
 
     var body: some View {
         NavigationStack {
@@ -107,23 +105,23 @@ struct SettingsView: View {
                 }
 
                 Section("Accounts — Microsoft 365") {
-                    TextField("Email", text: $office365Email)
-                    MacSecureField(text: $office365Password, placeholder: "Mailbox password")
-                        .frame(maxWidth: .infinity, minHeight: 22)
-                        .id(office365SecureFieldID)
-                    HStack {
-                        if office365PasswordTrimmed.isEmpty {
-                            Text("No password entered")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Password entered (\(office365PasswordTrimmed.count) characters)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    TextField("Application (client) ID", text: $msalClientID)
+                        .onChange(of: msalClientID) { _, value in
+                            MSALAppConfig.setClientIDOverride(value)
+                            MSALAuthService.shared.rebuildApplicationIfPossible()
                         }
-                        Spacer()
-                    }
-                    Text("GoDaddy Email Essentials / Microsoft 365 mailbox password for \(Office365Defaults.defaultEmail). IMAP outlook.office365.com:993 · SMTP smtp.office365.com:587 STARTTLS. Stored only in macOS Keychain — never committed.")
+                    Text("Paste the Entra Application (client) ID here — stored in UserDefaults (overrides empty Info.plist MSALClientID). No client secret; public client only.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("Redirect URI (register in Entra → Authentication → Mobile and desktop):")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(MSALAppConfig.redirectURI)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+
+                    Text("Basic IMAP password auth is disabled for Microsoft 365. Use Sign in with Microsoft (MSAL + Graph). Gmail App Password path is unchanged.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -139,6 +137,10 @@ struct SettingsView: View {
                                 ProgressView().controlSize(.small)
                             }
                         }
+                    } else if let user = MSALAuthService.shared.signedInUsername ?? MSALAppConfig.rememberedSignedInEmail {
+                        Text("Signed in: \(user)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
 
                     if !store.office365SyncStatus.isEmpty {
@@ -153,17 +155,15 @@ struct SettingsView: View {
                     }
 
                     HStack(spacing: 10) {
-                        Button(store.office365Account() == nil ? "Add Microsoft 365" : "Save Password") {
-                            Task { await saveOffice365() }
+                        Button("Sign in with Microsoft") {
+                            Task {
+                                office365Busy = true
+                                await store.signInMicrosoft365(clientIDOverride: msalClientID)
+                                office365Busy = false
+                            }
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!canSaveOffice365)
-
-                        Button("Test connection") {
-                            Task { await testOffice365FromSettings() }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!canTestOffice365)
+                        .disabled(office365Busy || store.office365IsSyncing || msalClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                         Button("Sync now") {
                             Task {
@@ -173,15 +173,18 @@ struct SettingsView: View {
                             }
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!canSyncOffice365)
-                    }
+                        .disabled(office365Busy || store.office365IsSyncing || (store.office365Account() == nil && !MSALAuthService.shared.isSignedIn))
 
-                    if store.office365Account() != nil {
-                        Button("Remove Microsoft 365 account", role: .destructive) {
-                            store.removeOffice365Account()
-                            office365Password = ""
-                            office365SecureFieldID = UUID()
-                            office365Email = Office365Defaults.defaultEmail
+                        if store.office365Account() != nil || MSALAuthService.shared.isSignedIn || MSALAppConfig.rememberedSignedInEmail != nil {
+                            Button("Sign out", role: .destructive) {
+                                Task {
+                                    office365Busy = true
+                                    await store.signOutMicrosoft365()
+                                    office365Busy = false
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(office365Busy || store.office365IsSyncing)
                         }
                     }
                 }
@@ -369,11 +372,8 @@ struct SettingsView: View {
                 } else {
                     gmailEmail = GmailDefaults.defaultEmail
                 }
-                if let email = store.office365Account()?.email ?? Office365SyncService.storedEmail() {
-                    office365Email = email
-                } else {
-                    office365Email = Office365Defaults.defaultEmail
-                }
+                msalClientID = MSALAppConfig.clientID
+                MSALAuthService.shared.refreshSignedInStateFromCache()
             }
         }
         .frame(minWidth: 560, minHeight: 480)
@@ -428,56 +428,6 @@ struct SettingsView: View {
         let fieldPass = gmailPasswordTrimmed.isEmpty ? nil : gmailPasswordTrimmed
         await store.testGmailConnection(email: gmailEmailTrimmed, appPassword: fieldPass)
         gmailBusy = false
-    }
-
-    private var office365EmailTrimmed: String {
-        office365Email.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var office365PasswordTrimmed: String {
-        office365Password.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var canSaveOffice365: Bool {
-        !office365Busy
-            && !office365EmailTrimmed.isEmpty
-            && !office365PasswordTrimmed.isEmpty
-    }
-
-    private var canTestOffice365: Bool {
-        guard !office365Busy, !store.office365IsSyncing, !office365EmailTrimmed.isEmpty else { return false }
-        if !office365PasswordTrimmed.isEmpty { return true }
-        return KeychainCredentialStore.hasCredentials(forEmail: office365EmailTrimmed)
-    }
-
-    private var canSyncOffice365: Bool {
-        guard let account = store.office365Account(), !office365Busy, !store.office365IsSyncing else { return false }
-        return KeychainCredentialStore.hasCredentials(forEmail: account.email)
-    }
-
-    private func saveOffice365() async {
-        office365Busy = true
-        store.office365LastError = nil
-        do {
-            try store.saveOffice365Credentials(email: office365EmailTrimmed, password: office365PasswordTrimmed)
-            office365Password = ""
-            office365SecureFieldID = UUID()
-            store.office365SyncStatus = "Credentials saved in Keychain."
-            await store.testOffice365Connection(email: office365EmailTrimmed)
-            if store.office365LastError == nil {
-                await store.syncOffice365Now()
-            }
-        } catch {
-            store.office365LastError = error.localizedDescription
-        }
-        office365Busy = false
-    }
-
-    private func testOffice365FromSettings() async {
-        office365Busy = true
-        let fieldPass = office365PasswordTrimmed.isEmpty ? nil : office365PasswordTrimmed
-        await store.testOffice365Connection(email: office365EmailTrimmed, password: fieldPass)
-        office365Busy = false
     }
 
     private func liveFlag(_ id: UUID) -> MailFlag? {

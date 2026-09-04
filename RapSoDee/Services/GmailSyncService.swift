@@ -73,6 +73,8 @@ enum Office365Defaults {
     static let tintHex = MailIMAPProvider.office365.tintHex
 }
 
+/// Account shell persistence for Microsoft 365. Mail sync/send use MSAL + Graph (see MSALAuthService / MicrosoftGraphMailService).
+/// IMAP helpers remain for reference; Settings no longer uses basic auth (disabled by Microsoft).
 enum Office365SyncService {
     private static let provider = MailIMAPProvider.office365
 

@@ -35,6 +35,9 @@ struct RapSoDeeApp: App {
             ContentView()
                 .environment(store)
                 .tint(MuseTheme.leaf)
+                .onOpenURL { url in
+                    MSALAuthService.handle(url: url)
+                }
         }
         .modelContainer(sharedModelContainer)
         .defaultSize(width: 1280, height: 800)
