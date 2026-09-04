@@ -50,6 +50,33 @@ actor SimpleSMTPClient {
         guard auth.code == 235 else { throw MailNetError.authFailed(auth.raw) }
     }
 
+    /// Office 365 SMTP AUTH with SASL XOAUTH2 (Bearer access token).
+    /// Token must be for scope `https://outlook.office.com/SMTP.Send` (not Graph).
+    func loginXOAuth2(email: String, accessToken: String) async throws {
+        guard backend != nil else { throw MailNetError.unexpected("Not connected") }
+        try await sendLine("EHLO rapsodee.local")
+        let ehlo = try await readResponse()
+        guard ehlo.code == 250 else { throw MailNetError.smtpFailed(ehlo.raw) }
+
+        // SASL XOAUTH2: base64("user=" + email + "^Aauth=Bearer " + token + "^A^A")
+        let raw = "user=\(email)\u{01}auth=Bearer \(accessToken)\u{01}\u{01}"
+        let encoded = Data(raw.utf8).base64EncodedString()
+
+        // Prefer one-line AUTH (widely accepted). If server replies 334, send the token as the next line.
+        try await sendLine("AUTH XOAUTH2 \(encoded)")
+        let first = try await readResponse()
+        if first.code == 235 {
+            return
+        }
+        if first.code == 334 {
+            try await sendLine(encoded)
+            let auth = try await readResponse()
+            guard auth.code == 235 else { throw MailNetError.authFailed(auth.raw) }
+            return
+        }
+        throw MailNetError.authFailed(first.raw)
+    }
+
     struct OutboundAttachment: Sendable {
         var filename: String
         var mimeType: String

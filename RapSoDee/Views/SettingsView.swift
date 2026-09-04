@@ -21,6 +21,7 @@ struct SettingsView: View {
     @State private var msalClientID = MSALAppConfig.clientID
     @State private var msalTenantID = MSALAppConfig.tenantID
     @State private var deviceCodePrompt: MSALDeviceCodePrompt?
+    @State private var preferSMTPSend = MSALAppConfig.preferSMTPSend
 
     var body: some View {
         NavigationStack {
@@ -169,6 +170,14 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
+
+                    Toggle("Prefer SMTP (XOAUTH2) for send", isOn: $preferSMTPSend)
+                        .onChange(of: preferSMTPSend) { _, value in
+                            MSALAppConfig.preferSMTPSend = value
+                        }
+                    Text("Default: Graph create-draft → send (closer to Outlook). On Graph failure, RapSoDee auto-falls back to SMTP. Enable this to always use smtp.office365.com:587 with XOAUTH2 (requires Entra SMTP.Send). NDRs like 550 5.7.708 are not visible in-app.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
                     HStack(spacing: 10) {
                         Button("Sign in with Microsoft") {
@@ -519,6 +528,7 @@ struct SettingsView: View {
                 }
                 msalClientID = MSALAppConfig.clientID
                 msalTenantID = MSALAppConfig.tenantID
+                preferSMTPSend = MSALAppConfig.preferSMTPSend
                 MSALAuthService.shared.refreshSignedInStateFromCache()
             }
         }

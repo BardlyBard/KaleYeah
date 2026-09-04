@@ -984,32 +984,67 @@ final class DemoMailStore: MailStore {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         let toPreview = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(2).joined(separator: ", ")
-        office365SyncStatus = "Sending via Graph as \(account.email) → \(toPreview)…"
+        let preferSMTP = MSALAppConfig.preferSMTPSend
+        office365SyncStatus = preferSMTP
+            ? "Sending via SMTP XOAUTH2 as \(account.email) → \(toPreview)…"
+            : "Sending via Graph draft→send as \(account.email) → \(toPreview)…"
         office365LastError = nil
         defer {
             office365IsSyncing = false
             office365SyncStartedAt = nil
         }
         do {
-            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
-            let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
-            let status = try await MicrosoftGraphMailService.sendMail(
-                accessToken: token,
-                draft: draft,
-                fromEmail: fromEmail,
-                mailboxEmail: account.email,
-                signature: account.signature
-            )
+            let status: String
+            if preferSMTP {
+                status = try await sendOffice365ViaSMTP(draft: draft, account: account)
+            } else {
+                do {
+                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
+                    let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
+                    status = try await MicrosoftGraphMailService.sendMail(
+                        accessToken: token,
+                        draft: draft,
+                        fromEmail: fromEmail,
+                        mailboxEmail: account.email,
+                        signature: account.signature
+                    )
+                } catch {
+                    // Graph API failure → try SMTP OAuth (NDRs are not visible in-app).
+                    let graphDetail = error.localizedDescription
+                    office365SyncStatus = "Graph send failed — trying SMTP XOAUTH2… (\(String(graphDetail.prefix(120))))"
+                    do {
+                        status = try await sendOffice365ViaSMTP(draft: draft, account: account)
+                    } catch {
+                        let smtpDetail = error.localizedDescription
+                        office365LastError = "Graph: \(graphDetail)\nSMTP: \(smtpDetail)"
+                        let short = smtpDetail.count > 200 ? String(smtpDetail.prefix(197)) + "…" : smtpDetail
+                        office365SyncStatus = "Send failed (Graph + SMTP) — \(short)"
+                        return
+                    }
+                }
+            }
             insertLocalSent(draft)
             office365SyncStatus = status
             office365LastError = nil
         } catch {
             let detail = error.localizedDescription
             office365LastError = detail
-            // Put Graph 4xx/5xx text in the status line so it is visible without digging.
             let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
             office365SyncStatus = "Send failed — \(short)"
         }
+    }
+
+    private func sendOffice365ViaSMTP(draft: ComposeDraft, account: MailAccount) async throws -> String {
+        let smtpToken = try await MSALAuthService.shared.acquireSMTPAccessToken(
+            interactiveIfNeeded: true,
+            loginHint: account.email
+        )
+        return try await MicrosoftGraphMailService.sendViaSMTPOAuth(
+            accessToken: smtpToken,
+            mailboxEmail: account.email,
+            draft: draft,
+            signature: account.signature
+        )
     }
 
     private enum Office365SyncTimeoutError: LocalizedError {

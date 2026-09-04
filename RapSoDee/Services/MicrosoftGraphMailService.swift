@@ -81,9 +81,11 @@ enum MicrosoftGraphMailService {
 
     // MARK: - Send
 
-    /// Sends via Graph. Uses mailbox identity of the signed-in `/me` user (do not spoof `from`
-    /// unless Send As is required). Replies with a Graph `remoteID` use createReply/createReplyAll
-    /// so conversation / In-Reply-To headers stay correct; otherwise `/me/sendMail`.
+    /// Sends via Graph. Uses mailbox identity of the signed-in `/me` user — never sets `from`
+    /// (spoofed From triggers outbound filters / NDR 550 5.7.708). Replies with a Graph
+    /// `remoteID` use createReply/createReplyAll → PATCH → send. New mail uses
+    /// POST `/me/messages` (draft) → POST `/me/messages/{id}/send` (closer to Outlook compose
+    /// than one-shot `/me/sendMail`, which can be treated more harshly for consumer destinations).
     /// Returns a short status line for the UI (no message body).
     @discardableResult
     static func sendMail(
@@ -102,11 +104,8 @@ enum MicrosoftGraphMailService {
         guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
 
         let mailbox = mailboxEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        let requestedFrom = fromEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Only set `from` when the compose From matches the signed-in mailbox (or is empty).
-        // A mismatched From requires Send As and can look like spoofing to outbound filters.
-        let fromMatchesMailbox = requestedFrom.isEmpty
-            || requestedFrom.caseInsensitiveCompare(mailbox) == .orderedSame
+        // fromEmail retained for API compatibility / status; never written into Graph payload.
+        _ = fromEmail
 
         if case .reply(let original) = draft.mode,
            let remoteID = original.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -149,8 +148,35 @@ enum MicrosoftGraphMailService {
             )
         }
 
+        try await sendNewMailViaDraftThenSend(
+            accessToken: accessToken,
+            subject: draft.subject,
+            bodyText: bodyText,
+            to: to,
+            cc: cc,
+            attachments: draft.attachments,
+            draft: draft
+        )
+        return sendStatusSummary(
+            path: "draft→send",
+            mailbox: mailbox,
+            to: to,
+            attachmentCount: draft.attachments.count
+        )
+    }
+
+    /// Create draft via POST /me/messages, then POST /me/messages/{id}/send.
+    private static func sendNewMailViaDraftThenSend(
+        accessToken: String,
+        subject: String,
+        bodyText: String,
+        to: [String],
+        cc: [String],
+        attachments: [ComposeAttachment],
+        draft: ComposeDraft
+    ) async throws {
         var messageObj: [String: Any] = [
-            "subject": draft.subject,
+            "subject": subject,
             "body": [
                 "contentType": "Text",
                 "content": bodyText,
@@ -158,26 +184,84 @@ enum MicrosoftGraphMailService {
             "toRecipients": recipientObjects(to),
             "ccRecipients": recipientObjects(cc),
         ]
-        if fromMatchesMailbox {
-            // Omit `from` — Graph sends as the `/me` mailbox (correct DKIM/alignment).
-        } else {
-            // Explicit Send As attempt; Graph will 403 if the mailbox lacks permission.
-            messageObj["from"] = ["emailAddress": ["address": requestedFrom]]
-        }
+        // Do not set `from` — Graph sends as the signed-in `/me` mailbox.
         if let headers = replyInternetMessageHeaders(for: draft) {
             messageObj["internetMessageHeaders"] = headers
         }
-        if let graphAttachments = fileAttachmentObjects(draft.attachments), !graphAttachments.isEmpty {
-            messageObj["attachments"] = graphAttachments
+        let createdData = try await postJSON(path: "/me/messages", accessToken: accessToken, body: messageObj)
+        struct CreatedDraft: Decodable { var id: String? }
+        let created = try JSONDecoder().decode(CreatedDraft.self, from: createdData)
+        guard let draftID = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !draftID.isEmpty else {
+            throw GraphError.unexpected("Graph create draft returned no message id")
         }
-        let payload: [String: Any] = [
-            "message": messageObj,
-            "saveToSentItems": true,
-        ]
-        try await postJSON(path: "/me/sendMail", accessToken: accessToken, body: payload)
+        let encodedDraft = draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID
+        if let graphAttachments = fileAttachmentObjects(attachments) {
+            for att in graphAttachments {
+                _ = try await postJSON(
+                    path: "/me/messages/\(encodedDraft)/attachments",
+                    accessToken: accessToken,
+                    body: att
+                )
+            }
+        }
+        _ = try await postJSON(path: "/me/messages/\(encodedDraft)/send", accessToken: accessToken, body: [:])
+    }
+
+    /// SMTP AUTH via XOAUTH2 to smtp.office365.com:587 (STARTTLS). Uses a token with
+    /// audience/scope `https://outlook.office.com/SMTP.Send` (not the Graph token).
+    @discardableResult
+    static func sendViaSMTPOAuth(
+        accessToken: String,
+        mailboxEmail: String,
+        draft: ComposeDraft,
+        signature: String?
+    ) async throws -> String {
+        var bodyText = draft.body
+        if let signature, !signature.isEmpty, !bodyText.contains(signature) {
+            bodyText += "\n\n--\n" + signature
+        }
+        let to = parseAddressList(draft.to)
+        let cc = parseAddressList(draft.cc)
+        guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
+        let mailbox = mailboxEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mailbox.isEmpty else { throw GraphError.unexpected("No mailbox email for SMTP send") }
+
+        var outbound: [SimpleSMTPClient.OutboundAttachment] = []
+        for att in draft.attachments {
+            guard let data = AttachmentStore.load(path: att.localPath) else { continue }
+            outbound.append(
+                .init(
+                    filename: att.filename,
+                    mimeType: att.mimeType.isEmpty ? "application/octet-stream" : att.mimeType,
+                    data: data
+                )
+            )
+        }
+
+        let smtp = SimpleSMTPClient()
+        do {
+            try await smtp.connect(
+                host: MailIMAPProvider.office365.smtpHost,
+                port: MailIMAPProvider.office365.smtpPort,
+                startTLS: true
+            )
+            try await smtp.loginXOAuth2(email: mailbox, accessToken: accessToken)
+            try await smtp.send(
+                from: mailbox,
+                to: to,
+                cc: cc,
+                subject: draft.subject,
+                body: bodyText,
+                attachments: outbound
+            )
+            await smtp.quit()
+        } catch {
+            await smtp.quit()
+            throw error
+        }
         return sendStatusSummary(
-            path: "sendMail",
-            mailbox: mailbox.isEmpty ? requestedFrom : mailbox,
+            path: "SMTP XOAUTH2",
+            mailbox: mailbox,
             to: to,
             attachmentCount: draft.attachments.count
         )

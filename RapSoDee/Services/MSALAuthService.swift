@@ -11,6 +11,18 @@ enum MSALAppConfig {
     static let scopes = ["Mail.Read", "Mail.ReadWrite", "Mail.Send", "User.Read"]
     /// Device-code / refresh token requests need offline_access for a refresh token.
     static let deviceCodeScopes = scopes + ["offline_access", "openid", "profile"]
+    /// Separate resource audience from Graph — request independently for SMTP AUTH XOAUTH2.
+    /// Entra: APIs my org uses → Office 365 Exchange Online → Delegated → SMTP.Send
+    /// (scope string `https://outlook.office.com/SMTP.Send`).
+    static let smtpScopes = ["https://outlook.office.com/SMTP.Send"]
+    static let preferSMTPSendKey = "rapSoDee.office365.preferSMTPSend"
+
+    /// When true, Office 365 compose uses SMTP XOAUTH2 first; otherwise Graph draft→send,
+    /// with automatic SMTP fallback if Graph send fails.
+    static var preferSMTPSend: Bool {
+        get { UserDefaults.standard.bool(forKey: preferSMTPSendKey) }
+        set { UserDefaults.standard.set(newValue, forKey: preferSMTPSendKey) }
+    }
     static let defaultClientID = "3f7dfcbe-daee-4902-a5db-cc779ad45c4b"
     /// Kale Yeah / GoDaddy M365 directory (single-tenant app).
     static let defaultTenantID = "d0b3fdba-6d90-4e3a-9938-c7a29e2359ee"
@@ -390,6 +402,67 @@ final class MSALAuthService {
         throw MSALAuthError.noAccount
     }
 
+    /// Access token for SMTP AUTH XOAUTH2. Graph tokens are a different audience and will not work.
+    func acquireSMTPAccessToken(interactiveIfNeeded: Bool = true, loginHint: String? = nil) async throws -> String {
+        rebuildApplicationIfPossible()
+        guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
+
+        if let application, let account = try? application.allAccounts().first {
+            do {
+                let silent = MSALSilentTokenParameters(scopes: MSALAppConfig.smtpScopes, account: account)
+                let result = try await acquireTokenSilent(application: application, parameters: silent)
+                signedInUsername = result.account.username ?? signedInUsername
+                return result.accessToken
+            } catch {
+                if interactiveIfNeeded {
+                    return try await acquireSMTPTokenInteractive(loginHint: loginHint ?? account.username)
+                }
+                // Fall through to device-code refresh with SMTP scope.
+            }
+        }
+
+        if let token = try await refreshDeviceCodeAccessTokenIfPossible(scopes: MSALAppConfig.smtpScopes + ["offline_access"]) {
+            return token
+        }
+
+        if interactiveIfNeeded {
+            return try await acquireSMTPTokenInteractive(loginHint: loginHint)
+        }
+        throw MSALAuthError.noAccount
+    }
+
+    private func acquireSMTPTokenInteractive(loginHint: String?) async throws -> String {
+        rebuildApplicationIfPossible()
+        guard let application else { throw MSALAuthError.missingClientID }
+        Self.cancelInteractiveSession()
+        deviceCodeCancelled = false
+        if interactiveInFlight {
+            interactiveInFlight = false
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        let presenter = try makePresentingViewController()
+        let webParams = MSALWebviewParameters(authPresentationViewController: presenter)
+        webParams.webviewType = .authenticationSession
+        webParams.prefersEphemeralWebBrowserSession = false
+
+        let parameters = MSALInteractiveTokenParameters(scopes: MSALAppConfig.smtpScopes, webviewParameters: webParams)
+        if let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines), !hint.isEmpty {
+            parameters.loginHint = hint
+        }
+        // Consent for SMTP.Send if not already granted.
+        parameters.promptType = .selectAccount
+
+        interactiveInFlight = true
+        defer { interactiveInFlight = false }
+        let result = try await acquireTokenInteractive(application: application, parameters: parameters)
+        signedInUsername = result.account.username ?? signedInUsername
+        if let username = signedInUsername {
+            MSALAppConfig.rememberedSignedInEmail = username
+        }
+        return result.accessToken
+    }
+
     func signOut() async {
         Self.cancelInteractiveSession()
         deviceCodeCancelled = true
@@ -442,9 +515,9 @@ final class MSALAuthService {
         KeychainCredentialStore.deletePassword(forEmail: MSALAppConfig.deviceCodeRefreshAccount)
     }
 
-    private func refreshDeviceCodeAccessTokenIfPossible() async throws -> String? {
+    private func refreshDeviceCodeAccessTokenIfPossible(scopes: [String]? = nil) async throws -> String? {
         guard let refresh = KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount) else {
-            return deviceCodeAccessToken
+            return scopes == nil ? deviceCodeAccessToken : nil
         }
         let clientID = MSALAppConfig.clientID
         let tenant = MSALAppConfig.tenantID
@@ -452,7 +525,8 @@ final class MSALAuthService {
         var request = URLRequest(url: tokenURL)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let scope = MSALAppConfig.deviceCodeScopes.joined(separator: " ")
+        let scopeList = scopes ?? MSALAppConfig.deviceCodeScopes
+        let scope = scopeList.joined(separator: " ")
         request.httpBody = Self.formURLEncoded([
             URLQueryItem(name: "grant_type", value: "refresh_token"),
             URLQueryItem(name: "client_id", value: clientID),
@@ -464,20 +538,25 @@ final class MSALAuthService {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["access_token"] as? String else {
-            // Stale refresh — clear so UI prompts sign-in again.
-            clearDeviceCodeTokens()
+            // Stale refresh or scope not consented — clear only when using default Graph scopes.
+            if scopes == nil {
+                clearDeviceCodeTokens()
+            }
             return nil
         }
         if let newRefresh = json["refresh_token"] as? String {
             try? KeychainCredentialStore.savePassword(newRefresh, forEmail: MSALAppConfig.deviceCodeRefreshAccount)
         }
-        deviceCodeAccessToken = accessToken
+        if scopes == nil {
+            deviceCodeAccessToken = accessToken
+        }
         if let idToken = json["id_token"] as? String, let email = Self.emailFromIDToken(idToken) {
             signedInUsername = email
             MSALAppConfig.rememberedSignedInEmail = email
         }
         return accessToken
     }
+
 
     nonisolated private static func formURLEncoded(_ items: [URLQueryItem]) -> String {
         items.compactMap { item -> String? in

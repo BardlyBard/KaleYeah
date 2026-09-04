@@ -93,16 +93,24 @@ Do **not** use `https://login.microsoftonline.com/common` for this registration 
    - `Mail.ReadWrite`
    - `Mail.Send`
    - `User.Read`
-9. Click **Grant admin consent** for the tenant if you are an admin (recommended for Kale Yeah).
-10. In RapSoDee Settings → paste the client ID → **Sign in with Microsoft** (prefer `derek.brown@kaleyeahinspections.com`) → **Sync now**.
+9. **API permissions** → **APIs my organization uses** → **Office 365 Exchange Online** → **Delegated**:
+   - `SMTP.Send` (scope string `https://outlook.office.com/SMTP.Send`) — required for the SMTP XOAUTH2 send fallback / Prefer SMTP setting. Grant admin consent after adding.
+10. Click **Grant admin consent** for the tenant if you are an admin (recommended for Kale Yeah).
+11. Ensure the mailbox has **Authenticated SMTP** enabled (Exchange admin / Microsoft 365 admin → Users → Mail → Manage email apps → Authenticated SMTP), or SMTP XOAUTH2 will fail even with a valid token.
+12. In RapSoDee Settings → paste the client ID → **Sign in with Microsoft** (prefer `derek.brown@kaleyeahinspections.com`) → **Sync now**. Re-consent if prompted after adding `SMTP.Send`.
 
-Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read` (MSAL adds reserved OIDC scopes itself; do not pass `openid`/`profile`/`offline_access` to acquireToken).
+Scopes used by the app:
+- Graph: `Mail.Read Mail.ReadWrite Mail.Send User.Read` (MSAL adds reserved OIDC scopes itself; do not pass `openid`/`profile`/`offline_access` to interactive `acquireToken`).
+- SMTP AUTH (separate token / audience): `https://outlook.office.com/SMTP.Send`
 
 ### Behaviour
 
 - **Sign in / Sign out / Sync** in Settings; signed-in account shown.
 - Graph lists recent Inbox + Sent; HTML bodies map into the existing reading pane.
-- Compose / reply send via Graph `sendMail`.
+- **Compose send (default):** Graph `POST /me/messages` (draft) → `POST /me/messages/{id}/send`. Never sets `from` when sending as the signed-in user.
+- **Replies:** Graph `createReply` / `createReplyAll` → PATCH → send.
+- **SMTP fallback:** on Graph send failure (or Settings → **Prefer SMTP (XOAUTH2) for send**), submit via `smtp.office365.com:587` STARTTLS with SASL XOAUTH2. Status line names the path used (`draft→send`, `createReply→send`, `SMTP XOAUTH2`).
+- Note: Graph `sendMail` one-shot was observed to NDR `550 5.7.708` AS(7910) for Kale→Gmail while OWA worked; draft→send matches Outlook compose more closely. NDRs are not knowable in-app.
 - Gmail App Password path is unchanged.
 - Basic M365 password UI is removed (basic auth is disabled).
 
