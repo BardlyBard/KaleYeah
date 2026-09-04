@@ -82,11 +82,10 @@ Bundle ID: `local.rapsodee.mail` → URL scheme `msauth.local.rapsodee.mail`.
    - `Mail.ReadWrite`
    - `Mail.Send`
    - `User.Read`
-   - (MSAL also requests `offline_access` for refresh tokens)
 9. Click **Grant admin consent** for the tenant if you are an admin (recommended for Kale Yeah).
 10. In RapSoDee Settings → paste the client ID → **Sign in with Microsoft** (prefer `derek.brown@kaleyeahinspections.com`) → **Sync now**.
 
-Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read offline_access`.
+Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read` (MSAL adds reserved OIDC scopes itself; do not pass `openid`/`profile`/`offline_access` to acquireToken).
 
 ### Behaviour
 

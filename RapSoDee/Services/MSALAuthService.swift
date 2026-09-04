@@ -8,7 +8,7 @@ enum MSALAppConfig {
     /// Exact redirect URI to register in Entra (Authentication → Public client/native).
     static let redirectURI = "msauth.\(bundleID)://auth"
     static let urlScheme = "msauth.\(bundleID)"
-    static let scopes = ["Mail.Read", "Mail.ReadWrite", "Mail.Send", "User.Read", "offline_access"]
+    static let scopes = ["Mail.Read", "Mail.ReadWrite", "Mail.Send", "User.Read"]
     static let defaultClientID = "3f7dfcbe-daee-4902-a5db-cc779ad45c4b"
     static let clientIDDefaultsKey = "rapSoDee.msal.clientID"
     static let signedInEmailKey = "rapSoDee.msal.signedInEmail"
