@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct MessageListView: View {
     @Environment(DemoMailStore.self) private var store
@@ -31,6 +34,9 @@ struct MessageListView: View {
                 }
             }
             .listStyle(.inset(alternatesRowBackgrounds: false))
+            // Keep controls usable but never let leaf-green own row selection.
+            .tint(MuseTheme.oatmeal)
+            .background(DisableListSelectionHighlight())
         }
         .navigationTitle(title)
         .onChange(of: selection) { _, _ in
@@ -84,19 +90,33 @@ struct MessageListView: View {
         .background(.bar)
     }
 
+    private func flagHex(for message: MailMessage) -> String {
+        if let id = message.flagID, let flag = store.flags.first(where: { $0.id == id }) {
+            return flag.colorHex
+        }
+        if let first = store.flags.first {
+            return first.colorHex
+        }
+        return "E07A3D"
+    }
+
     private func rowBackground(for message: MailMessage) -> Color {
-        // Flag wash dominates over account tint / approve soft so flagged mail is obvious.
+        let isSelected = selectedMessageID == message.id
+
+        // Selected + flagged: stronger flag color (clearer than soft wash).
         if message.isFlagged {
-            let hex: String
-            if let id = message.flagID, let flag = store.flags.first(where: { $0.id == id }) {
-                hex = flag.colorHex
-            } else if let first = store.flags.first {
-                hex = first.colorHex
-            } else {
-                hex = "E07A3D"
+            let hex = flagHex(for: message)
+            if isSelected {
+                return MuseTheme.flagSelectionWash(hex, scheme: colorScheme)
             }
             return MuseTheme.flagWash(hex, scheme: colorScheme)
         }
+
+        // Selected + no flag: light grey — never leaf-green system accent.
+        if isSelected {
+            return MuseTheme.selectionGrey(scheme: colorScheme)
+        }
+
         if message.disposition == .pendingApproval {
             return MuseTheme.approveSoft.opacity(0.45)
         }
@@ -169,3 +189,45 @@ struct MessageRowView: View {
         return MuseTheme.approve
     }
 }
+
+#if os(macOS)
+/// Disables NSTableView’s accent-colored selection highlight so `listRowBackground` owns selection looks.
+private struct DisableListSelectionHighlight: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let table = findTableView(startingAt: nsView) else { return }
+            if table.selectionHighlightStyle != .none {
+                table.selectionHighlightStyle = .none
+            }
+        }
+    }
+
+    private func findTableView(startingAt view: NSView) -> NSTableView? {
+        var current: NSView? = view
+        while let node = current {
+            if let table = node as? NSTableView {
+                return table
+            }
+            if let found = findTableView(in: node) {
+                return found
+            }
+            current = node.superview
+        }
+        return nil
+    }
+
+    private func findTableView(in root: NSView) -> NSTableView? {
+        if let table = root as? NSTableView { return table }
+        for child in root.subviews {
+            if let found = findTableView(in: child) { return found }
+        }
+        return nil
+    }
+}
+#endif

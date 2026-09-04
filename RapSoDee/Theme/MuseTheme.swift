@@ -26,6 +26,22 @@ enum MuseTheme {
         return Color(hex: hex).opacity(opacity)
     }
 
+    /// Stronger flag wash for the selected/highlighted row — clearer than soft wash
+    /// so selection is obvious while still reading as that flag’s color.
+    static func flagSelectionWash(_ hex: String, scheme: ColorScheme = .light) -> Color {
+        let opacity = scheme == .dark ? 0.52 : 0.42
+        return Color(hex: hex).opacity(opacity)
+    }
+
+    /// Neutral selection for unflagged rows — light grey / near-white paper, never leaf-green.
+    static func selectionGrey(scheme: ColorScheme = .light) -> Color {
+        if scheme == .dark {
+            return Color.white.opacity(0.14)
+        }
+        // Near-white paper with a clear light-grey lift
+        return Color(red: 0.89, green: 0.88, blue: 0.86)
+    }
+
     /// Even softer wash for reading-pane header chrome.
     static func flagHeaderWash(_ hex: String, scheme: ColorScheme = .light) -> Color {
         let opacity = scheme == .dark ? 0.22 : 0.14
