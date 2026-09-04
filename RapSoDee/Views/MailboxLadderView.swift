@@ -5,6 +5,11 @@ struct MailboxLadderView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Binding var selection: LadderSelection
 
+    /// Per-account mailbox list expand state. Missing keys default to expanded.
+    @State private var expandedByAccount: [UUID: Bool] = [:]
+
+    private static let expandDefaultsKey = "rapSoDee.accountMailboxExpanded"
+
     var body: some View {
         List(selection: $selection) {
             Section {
@@ -76,6 +81,13 @@ struct MailboxLadderView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 6)
         }
+        .onAppear {
+            loadExpandedState()
+            expandAccountsContainingSelection()
+        }
+        .onChange(of: selection) { _, _ in
+            expandAccountsContainingSelection()
+        }
     }
 
     // MARK: - Account card (one soft tinted blob per account)
@@ -85,68 +97,84 @@ struct MailboxLadderView: View {
         let folders = folders(for: account)
         let focused = isAccountFocused(account)
         let tint = Color(hex: account.tintHex)
+        let expanded = isExpanded(account)
 
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 10, height: 10)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
-                    }
-                Text(account.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(MuseTheme.ink)
-                    .lineLimit(1)
-                if account.inboxPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2)
-                        .foregroundStyle(MuseTheme.leaf)
-                        .help("Pinned into One Inbox")
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
+            Button {
+                toggleExpanded(account)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(MuseTheme.ink.opacity(0.55))
+                        .frame(width: 12, alignment: .center)
+                        .contentTransition(.symbolEffect(.replace))
 
-            ForEach(folders) { folder in
-                let tag = LadderSelection.folder(folder.id)
-                let selected = selection == tag
-                Button {
-                    selection = tag
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: icon(for: folder.kind))
-                            .font(.body)
-                            .foregroundStyle(selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72))
-                            .frame(width: 18)
-                        Text(folder.name)
-                            .font(.body)
-                            .fontWeight(selected ? .semibold : .regular)
-                            .foregroundStyle(MuseTheme.ink)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background {
-                        if selected {
-                            RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
-                                .fill(MuseTheme.sage.opacity(colorScheme == .dark ? 0.55 : 0.92))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
-                                        .strokeBorder(MuseTheme.leaf.opacity(0.28), lineWidth: 1)
-                                }
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 10, height: 10)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
                         }
+                    Text(account.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(MuseTheme.ink)
+                        .lineLimit(1)
+                    if account.inboxPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(MuseTheme.leaf)
+                            .help("Pinned into One Inbox")
                     }
-                    .contentShape(Rectangle())
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, expanded ? 6 : 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Collapse mailboxes" : "Expand mailboxes")
+
+            if expanded {
+                ForEach(folders) { folder in
+                    let tag = LadderSelection.folder(folder.id)
+                    let selected = selection == tag
+                    Button {
+                        selection = tag
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: icon(for: folder.kind))
+                                .font(.body)
+                                .foregroundStyle(selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72))
+                                .frame(width: 18)
+                            Text(folder.name)
+                                .font(.body)
+                                .fontWeight(selected ? .semibold : .regular)
+                                .foregroundStyle(MuseTheme.ink)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background {
+                            if selected {
+                                RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                    .fill(MuseTheme.sage.opacity(colorScheme == .dark ? 0.55 : 0.92))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                            .strokeBorder(MuseTheme.leaf.opacity(0.28), lineWidth: 1)
+                                    }
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 6)
+                }
             }
         }
-        .padding(.bottom, 8)
+        .padding(.bottom, expanded ? 8 : 0)
         .background {
             RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
                 .fill(MuseTheme.accountCardWash(account.tintHex, focused: focused, scheme: colorScheme))
@@ -164,6 +192,58 @@ struct MailboxLadderView: View {
                 )
         }
         .animation(.easeInOut(duration: 0.18), value: focused)
+        .animation(.easeInOut(duration: 0.18), value: expanded)
+    }
+
+    // MARK: - Expand / collapse persistence
+
+    private func isExpanded(_ account: MailAccount) -> Bool {
+        expandedByAccount[account.id] ?? true
+    }
+
+    private func toggleExpanded(_ account: MailAccount) {
+        let next = !isExpanded(account)
+        expandedByAccount[account.id] = next
+        persistExpandedState()
+    }
+
+    private func setExpanded(_ accountID: UUID, _ expanded: Bool) {
+        if expandedByAccount[accountID] == expanded { return }
+        expandedByAccount[accountID] = expanded
+        persistExpandedState()
+    }
+
+    private func expandAccountsContainingSelection() {
+        switch selection {
+        case .folder(let id):
+            if let accountID = store.folders.first(where: { $0.id == id })?.accountID {
+                setExpanded(accountID, true)
+            }
+        case .accountInbox(let accountID):
+            setExpanded(accountID, true)
+        case .unifiedInbox, .approve:
+            break
+        }
+    }
+
+    private func loadExpandedState() {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.expandDefaultsKey) as? [String: Bool] else {
+            return
+        }
+        var loaded: [UUID: Bool] = [:]
+        for (key, value) in raw {
+            if let id = UUID(uuidString: key) {
+                loaded[id] = value
+            }
+        }
+        if !loaded.isEmpty {
+            expandedByAccount = loaded
+        }
+    }
+
+    private func persistExpandedState() {
+        let raw = Dictionary(uniqueKeysWithValues: expandedByAccount.map { ($0.key.uuidString, $0.value) })
+        UserDefaults.standard.set(raw, forKey: Self.expandDefaultsKey)
     }
 
     private func isAccountFocused(_ account: MailAccount) -> Bool {
