@@ -31,6 +31,10 @@ protocol MailStore: AnyObject {
     func updateAccountTint(accountID: UUID, hex: String)
 
     func upsertFlag(_ flag: MailFlag)
+    /// Rename only — must never touch colorHex.
+    func renameFlag(id: UUID, name: String)
+    /// Color only — must never touch name.
+    func updateFlagColor(id: UUID, colorHex: String)
     func deleteFlag(_ id: UUID)
 
     func sendCompose(_ draft: ComposeDraft)

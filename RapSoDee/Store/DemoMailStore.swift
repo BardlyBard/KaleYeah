@@ -197,6 +197,18 @@ final class DemoMailStore: MailStore {
         }
     }
 
+    func renameFlag(id: UUID, name: String) {
+        guard let i = flags.firstIndex(where: { $0.id == id }) else { return }
+        flags[i].name = name
+    }
+
+    func updateFlagColor(id: UUID, colorHex: String) {
+        guard let i = flags.firstIndex(where: { $0.id == id }) else { return }
+        let cleaned = colorHex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted).uppercased()
+        guard cleaned.count == 6 || cleaned.count == 8 else { return }
+        flags[i].colorHex = cleaned
+    }
+
     func deleteFlag(_ id: UUID) {
         flags.removeAll { $0.id == id }
         for i in messages.indices where messages[i].flagID == id {

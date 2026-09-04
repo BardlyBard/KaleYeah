@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// Apple Mail–style flag chooser: color swatch + name per flag, plus Clear Flag.
 struct FlagMenuContent: View {
@@ -13,11 +16,11 @@ struct FlagMenuContent: View {
             Button {
                 onSelect(flag.id)
             } label: {
+                // Non-template NSImage swatch — Menu would otherwise recolor SF Symbols / shapes.
                 Label {
                     Text(flag.name)
                 } icon: {
-                    Image(systemName: "flag.fill")
-                        .foregroundStyle(Color(hex: flag.colorHex))
+                    Image(nsImage: FlagSwatch.circleImage(hex: flag.colorHex))
                 }
             }
         }
@@ -54,3 +57,26 @@ struct FlagToolbarMenu: View {
         .help("Flag")
     }
 }
+
+#if os(macOS)
+/// Renders a filled circle that keeps its real color inside AppKit menus
+/// (template SF Symbols get wiped to label/primary style).
+enum FlagSwatch {
+    static func circleImage(hex: String, side: CGFloat = 12) -> NSImage {
+        let color = NSColor(Color(hex: hex))
+        let size = NSSize(width: side, height: side)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let inset = rect.insetBy(dx: 0.5, dy: 0.5)
+            color.setFill()
+            NSBezierPath(ovalIn: inset).fill()
+            NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+            let stroke = NSBezierPath(ovalIn: inset)
+            stroke.lineWidth = 0.5
+            stroke.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}
+#endif

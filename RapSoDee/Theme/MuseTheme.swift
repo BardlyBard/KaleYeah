@@ -76,16 +76,26 @@ extension Color {
     }
 
     /// Convert to RRGGBB hex for persistence (ColorPicker ↔ stored string).
+    /// Returns nil when the color cannot be represented in sRGB so callers can
+    /// refuse to overwrite a stored hex (avoids wipe-on-rename ColorPicker churn).
     func toHexString() -> String {
+        toHexStringOrNil() ?? "E07A3D"
+    }
+
+    func toHexStringOrNil() -> String? {
 #if os(macOS)
         let ns = NSColor(self)
-        guard let rgb = ns.usingColorSpace(.sRGB) else { return "E07A3D" }
+        // Prefer sRGB; fall back through device RGB before giving up.
+        let rgb = ns.usingColorSpace(.sRGB)
+            ?? ns.usingColorSpace(.deviceRGB)
+            ?? ns.usingColorSpace(.genericRGB)
+        guard let rgb else { return nil }
         let r = Int(round(rgb.redComponent * 255))
         let g = Int(round(rgb.greenComponent * 255))
         let b = Int(round(rgb.blueComponent * 255))
         return String(format: "%02X%02X%02X", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
 #else
-        return "E07A3D"
+        return nil
 #endif
     }
 }

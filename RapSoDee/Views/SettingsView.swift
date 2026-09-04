@@ -85,12 +85,11 @@ struct SettingsView: View {
                             Circle()
                                 .fill(Color(hex: liveFlag(flag.id)?.colorHex ?? flag.colorHex))
                                 .frame(width: 14, height: 14)
+                            // Name and color are independent — rename never touches colorHex.
                             TextField("Name", text: Binding(
                                 get: { liveFlag(flag.id)?.name ?? flag.name },
                                 set: { name in
-                                    guard var updated = liveFlag(flag.id) else { return }
-                                    updated.name = name
-                                    store.upsertFlag(updated)
+                                    store.renameFlag(id: flag.id, name: name)
                                     syncFlagsToSwiftData()
                                 }
                             ))
@@ -99,9 +98,12 @@ struct SettingsView: View {
                                 selection: Binding(
                                     get: { Color(hex: liveFlag(flag.id)?.colorHex ?? flag.colorHex) },
                                     set: { color in
-                                        guard var updated = liveFlag(flag.id) else { return }
-                                        updated.colorHex = color.toHexString()
-                                        store.upsertFlag(updated)
+                                        // Ignore spurious ColorPicker writes (e.g. after rename
+                                        // re-render) and failed hex conversion so colorHex stays put.
+                                        guard let hex = color.toHexStringOrNil() else { return }
+                                        let current = liveFlag(flag.id)?.colorHex.uppercased()
+                                        guard hex != current else { return }
+                                        store.updateFlagColor(id: flag.id, colorHex: hex)
                                         syncFlagsToSwiftData()
                                     }
                                 ),
