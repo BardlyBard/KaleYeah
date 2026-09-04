@@ -732,9 +732,12 @@ final class DemoMailStore: MailStore {
     }
 
     /// Interactive MSAL sign-in, then Graph sync.
-    func signInMicrosoft365(clientIDOverride: String? = nil) async {
+    func signInMicrosoft365(clientIDOverride: String? = nil, tenantIDOverride: String? = nil) async {
         if let override = clientIDOverride {
             MSALAppConfig.setClientIDOverride(override)
+        }
+        if let tenant = tenantIDOverride {
+            MSALAppConfig.setTenantIDOverride(tenant)
         }
         guard !MSALAppConfig.clientID.isEmpty else {
             office365LastError = MSALAuthError.missingClientID.localizedDescription
@@ -766,6 +769,50 @@ final class DemoMailStore: MailStore {
         }
     }
 
+    /// Device-code fallback when browser redirect hangs after Allow.
+    func signInMicrosoft365WithDeviceCode(
+        clientIDOverride: String? = nil,
+        tenantIDOverride: String? = nil,
+        onPrompt: @MainActor @escaping (MSALDeviceCodePrompt) -> Void
+    ) async {
+        if let override = clientIDOverride {
+            MSALAppConfig.setClientIDOverride(override)
+        }
+        if let tenant = tenantIDOverride {
+            MSALAppConfig.setTenantIDOverride(tenant)
+        }
+        guard !MSALAppConfig.clientID.isEmpty else {
+            office365LastError = MSALAuthError.missingClientID.localizedDescription
+            office365NeedsSetup = true
+            return
+        }
+        office365IsSyncing = true
+        office365SyncStartedAt = Date()
+        office365LastError = nil
+        office365SyncStatus = "Starting device code sign-in…"
+        defer {
+            office365IsSyncing = false
+            office365SyncStartedAt = nil
+        }
+        do {
+            _ = try await MSALAuthService.shared.signInWithDeviceCode(
+                loginHint: Office365Defaults.defaultEmail,
+                onPrompt: onPrompt
+            )
+            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
+            office365NeedsSetup = false
+            office365SyncStatus = "Signed in as \(email) (device code)"
+            office365IsSyncing = false
+            office365SyncStartedAt = nil
+            await syncOffice365Now()
+        } catch {
+            office365LastError = error.localizedDescription
+            office365SyncStatus = "Device code sign-in failed"
+        }
+    }
+
     func signOutMicrosoft365() async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
@@ -792,7 +839,7 @@ final class DemoMailStore: MailStore {
 
     /// Escape hatch when Graph/MSAL hangs — unlocks Sign in / Sync / Sign out immediately.
     func cancelOffice365Sync() {
-        MSALAuthService.cancelInteractiveSession()
+        MSALAuthService.cancelPendingAuth()
         office365IsSyncing = false
         office365SyncStartedAt = nil
         office365SyncStatus = "Sync / sign-in cancelled"

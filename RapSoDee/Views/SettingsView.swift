@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import AppKit
 
 struct SettingsView: View {
     @Environment(DemoMailStore.self) private var store
@@ -18,6 +19,8 @@ struct SettingsView: View {
 
     @State private var office365Busy = false
     @State private var msalClientID = MSALAppConfig.clientID
+    @State private var msalTenantID = MSALAppConfig.tenantID
+    @State private var deviceCodePrompt: MSALDeviceCodePrompt?
 
     var body: some View {
         NavigationStack {
@@ -114,6 +117,19 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    TextField("Directory (tenant) ID", text: $msalTenantID)
+                        .onChange(of: msalTenantID) { _, value in
+                            MSALAppConfig.setTenantIDOverride(value)
+                            MSALAuthService.shared.rebuildApplicationIfPossible()
+                        }
+                    Text("Single-tenant apps must use your directory ID (not /common). Stored in UserDefaults like the client ID. Default: Kale Yeah tenant.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Authority: \(MSALAppConfig.authorityURL.absoluteString)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+
                     Text("Redirect URI (register in Entra → Authentication → Mobile and desktop):")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -158,11 +174,33 @@ struct SettingsView: View {
                         Button("Sign in with Microsoft") {
                             Task {
                                 office365Busy = true
+                                deviceCodePrompt = nil
                                 defer { office365Busy = false }
-                                await store.signInMicrosoft365(clientIDOverride: msalClientID)
+                                await store.signInMicrosoft365(
+                                    clientIDOverride: msalClientID,
+                                    tenantIDOverride: msalTenantID
+                                )
                             }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(office365Busy || store.office365IsSyncing || msalClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button("Sign in with device code") {
+                            Task {
+                                office365Busy = true
+                                deviceCodePrompt = nil
+                                defer { office365Busy = false }
+                                await store.signInMicrosoft365WithDeviceCode(
+                                    clientIDOverride: msalClientID,
+                                    tenantIDOverride: msalTenantID
+                                ) { prompt in
+                                    deviceCodePrompt = prompt
+                                    store.office365SyncStatus = "Enter code \(prompt.userCode) at \(prompt.verificationURL.host ?? "microsoft.com/devicelogin")"
+                                }
+                                deviceCodePrompt = nil
+                            }
+                        }
+                        .buttonStyle(.bordered)
                         .disabled(office365Busy || store.office365IsSyncing || msalClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                         Button("Sync now") {
@@ -179,6 +217,7 @@ struct SettingsView: View {
                             Button("Sign out", role: .destructive) {
                                 Task {
                                     office365Busy = true
+                                    deviceCodePrompt = nil
                                     defer { office365Busy = false }
                                     await store.signOutMicrosoft365()
                                 }
@@ -188,7 +227,51 @@ struct SettingsView: View {
                         }
                     }
 
-                    Text("After Allow, RapSoDee should come forward automatically. If Safari shows a blank page, click back to RapSoDee once — then use Cancel stuck sign-in if needed.")
+                    if let prompt = deviceCodePrompt {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Device code sign-in")
+                                .font(.headline)
+                            Text(prompt.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            HStack(spacing: 8) {
+                                Text("Code:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(prompt.userCode)
+                                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                                    .textSelection(.enabled)
+                                Button("Copy code") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(prompt.userCode, forType: .string)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            HStack(spacing: 8) {
+                                Text(prompt.verificationURL.absoluteString)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Button("Copy URL") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(prompt.verificationURL.absoluteString, forType: .string)
+                                }
+                                .buttonStyle(.bordered)
+                                Button("Open") {
+                                    NSWorkspace.shared.open(prompt.verificationURL)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            Text("No browser redirect needed — enter the code on another device/browser, then wait here until RapSoDee finishes.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                        .background(MuseTheme.paper.opacity(0.8))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    Text("After Allow, RapSoDee should come forward automatically. If the browser still hangs, use Sign in with device code instead.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
@@ -213,6 +296,7 @@ struct SettingsView: View {
                             Button("Cancel sign-in / sync") {
                                 store.cancelOffice365Sync()
                                 office365Busy = false
+                                deviceCodePrompt = nil
                             }
                             .buttonStyle(.bordered)
                             .tint(.orange)
@@ -220,9 +304,10 @@ struct SettingsView: View {
                     } else if let err = store.office365LastError,
                               err.localizedCaseInsensitiveContains("interactive session") {
                         Button("Clear stuck sign-in") {
-                            MSALAuthService.cancelInteractiveSession()
+                            MSALAuthService.cancelPendingAuth()
                             store.cancelOffice365Sync()
                             office365Busy = false
+                            deviceCodePrompt = nil
                             store.office365LastError = nil
                             store.office365SyncStatus = "Cleared stuck Microsoft sign-in. Try Sign in again."
                         }
@@ -415,6 +500,7 @@ struct SettingsView: View {
                     gmailEmail = GmailDefaults.defaultEmail
                 }
                 msalClientID = MSALAppConfig.clientID
+                msalTenantID = MSALAppConfig.tenantID
                 MSALAuthService.shared.refreshSignedInStateFromCache()
             }
         }

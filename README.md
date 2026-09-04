@@ -63,10 +63,21 @@ msauth.local.rapsodee.mail://auth
 
 Bundle ID: `local.rapsodee.mail` → URL scheme `msauth.local.rapsodee.mail`.
 
-### Where to paste the Application (client) ID
+### Where to paste the Application (client) ID / Tenant ID
 
 1. **Default client ID** (public client, no secret): `3f7dfcbe-daee-4902-a5db-cc779ad45c4b` — baked into `MSALAppConfig.defaultClientID` and Info.plist `MSALClientID`.
 2. **Override without rebuild:** Settings → Microsoft 365 → **Application (client) ID** (UserDefaults `rapSoDee.msal.clientID`).
+3. **Directory (tenant) ID** (single-tenant): `d0b3fdba-6d90-4e3a-9938-c7a29e2359ee` — baked into `MSALAppConfig.defaultTenantID`. Override in Settings (UserDefaults `rapSoDee.msal.tenantID`). Changing tenant recreates the MSAL app.
+
+### Single-tenant authority (important)
+
+This Entra app is registered as **Accounts in this organizational directory only**. MSAL must use:
+
+```
+https://login.microsoftonline.com/d0b3fdba-6d90-4e3a-9938-c7a29e2359ee
+```
+
+Do **not** use `https://login.microsoftonline.com/common` for this registration — that mismatch can hang or break the return after **Allow**.
 
 ### Entra app registration steps
 
@@ -97,12 +108,13 @@ Scopes used by the app: `Mail.Read Mail.ReadWrite Mail.Send User.Read` (MSAL add
 
 ### After Allow (OAuth return)
 
-RapSoDee uses MSAL **ASWebAuthenticationSession** (`webviewType = .authenticationSession`) with URL scheme `msauth.local.rapsodee.mail` (Info.plist `CFBundleURLTypes`) and Entra redirect **`msauth.local.rapsodee.mail://auth`**.
+RapSoDee uses MSAL **ASWebAuthenticationSession** (`webviewType = .authenticationSession`) with URL scheme `msauth.local.rapsodee.mail` (Info.plist `CFBundleURLTypes`) and Entra redirect **`msauth.local.rapsodee.mail://auth`**, against the **single-tenant** authority above.
 
 1. Tap **Sign in with Microsoft** → system auth UI / browser appears.
 2. Sign in and tap **Allow**.
 3. **Expected:** auth UI dismisses and **RapSoDee comes forward** signed in, then sync starts.
 4. If Safari still shows a blank “you can close this” page, click back to RapSoDee once. If Settings says *Only one interactive session is allowed at a time*, tap **Clear stuck sign-in** / **Cancel sign-in / sync**, then Sign in again (RapSoDee cancels the orphan session and retries once automatically).
+5. **If the browser still hangs after Allow:** use **Sign in with device code** in Settings. RapSoDee shows a copyable user code + `https://microsoft.com/devicelogin` (no app redirect). Enter the code in any browser; RapSoDee polls until signed in. (Implemented via OAuth device authorization grant — MSAL ObjC has no `acquireTokenWithDeviceCode` API.)
 
 ## Project layout
 
