@@ -36,36 +36,16 @@ struct MailboxLadderView: View {
                 softSectionHeader("Smart")
             }
 
-            ForEach(store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder })) { account in
-                Section {
-                    ForEach(folders(for: account)) { folder in
-                        Label(folder.name, systemImage: icon(for: folder.kind))
-                            .tag(LadderSelection.folder(folder.id))
-                            .listRowBackground(
-                                mailboxWash(
-                                    for: .folder(folder.id),
-                                    base: MuseTheme.accountTint(account.tintHex)
-                                )
-                            )
-                    }
-                } header: {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(Color(hex: account.tintHex))
-                            .frame(width: 8, height: 8)
-                        Text(account.name)
-                        if account.inboxPinned {
-                            Image(systemName: "pin.fill")
-                                .font(.caption2)
-                                .foregroundStyle(MuseTheme.leaf)
-                        }
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(MuseTheme.ink.opacity(0.75))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(MuseTheme.sage.opacity(0.7), in: Capsule())
+            Section {
+                ForEach(store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder })) { account in
+                    accountCard(account)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .selectionDisabled(true)
                 }
+            } header: {
+                softSectionHeader("Accounts")
             }
 
             if let junk = store.folders.first(where: { $0.kind == .junk }) {
@@ -97,6 +77,107 @@ struct MailboxLadderView: View {
                 .padding(.vertical, 6)
         }
     }
+
+    // MARK: - Account card (one soft tinted blob per account)
+
+    @ViewBuilder
+    private func accountCard(_ account: MailAccount) -> some View {
+        let folders = folders(for: account)
+        let focused = isAccountFocused(account)
+        let tint = Color(hex: account.tintHex)
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 10, height: 10)
+                    .overlay {
+                        Circle()
+                            .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
+                    }
+                Text(account.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(MuseTheme.ink)
+                    .lineLimit(1)
+                if account.inboxPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(MuseTheme.leaf)
+                        .help("Pinned into One Inbox")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
+            ForEach(folders) { folder in
+                let tag = LadderSelection.folder(folder.id)
+                let selected = selection == tag
+                Button {
+                    selection = tag
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: icon(for: folder.kind))
+                            .font(.body)
+                            .foregroundStyle(selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72))
+                            .frame(width: 18)
+                        Text(folder.name)
+                            .font(.body)
+                            .fontWeight(selected ? .semibold : .regular)
+                            .foregroundStyle(MuseTheme.ink)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background {
+                        if selected {
+                            RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                .fill(MuseTheme.sage.opacity(colorScheme == .dark ? 0.55 : 0.92))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                        .strokeBorder(MuseTheme.leaf.opacity(0.28), lineWidth: 1)
+                                }
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 6)
+            }
+        }
+        .padding(.bottom, 8)
+        .background {
+            RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                .fill(MuseTheme.accountCardWash(account.tintHex, focused: focused, scheme: colorScheme))
+                .overlay {
+                    RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
+                        .strokeBorder(
+                            tint.opacity(focused ? 0.42 : 0.16),
+                            lineWidth: focused ? 1.25 : 1
+                        )
+                }
+                .shadow(
+                    color: tint.opacity(focused ? 0.18 : 0.06),
+                    radius: focused ? 8 : 3,
+                    y: focused ? 2 : 1
+                )
+        }
+        .animation(.easeInOut(duration: 0.18), value: focused)
+    }
+
+    private func isAccountFocused(_ account: MailAccount) -> Bool {
+        switch selection {
+        case .folder(let id):
+            return store.folders.first(where: { $0.id == id })?.accountID == account.id
+        case .accountInbox(let accountID):
+            return accountID == account.id
+        case .unifiedInbox, .approve:
+            return false
+        }
+    }
+
+    // MARK: - Shared chrome
 
     @ViewBuilder
     private func softSectionHeader(_ title: String) -> some View {

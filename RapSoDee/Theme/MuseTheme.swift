@@ -27,6 +27,19 @@ enum MuseTheme {
         Color(hex: hex).opacity(0.14)
     }
 
+    /// Soft wash for an entire account card in the mailbox ladder.
+    /// Focused account (contains the selected mailbox) gets a stronger tint blob;
+    /// others stay quieter so the ladder doesn’t turn into a rainbow of rows.
+    static func accountCardWash(_ hex: String, focused: Bool, scheme: ColorScheme = .light) -> Color {
+        let opacity: Double
+        if focused {
+            opacity = scheme == .dark ? 0.38 : 0.30
+        } else {
+            opacity = scheme == .dark ? 0.16 : 0.12
+        }
+        return Color(hex: hex).opacity(opacity)
+    }
+
     /// Soft pastel wash from a user-named flag color. Stronger than account tint so
     /// flag rows read clearly, but muted enough that list text stays readable in
     /// light and dark appearances.
