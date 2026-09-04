@@ -158,8 +158,8 @@ struct SettingsView: View {
                         Button("Sign in with Microsoft") {
                             Task {
                                 office365Busy = true
+                                defer { office365Busy = false }
                                 await store.signInMicrosoft365(clientIDOverride: msalClientID)
-                                office365Busy = false
                             }
                         }
                         .buttonStyle(.borderedProminent)
@@ -168,8 +168,8 @@ struct SettingsView: View {
                         Button("Sync now") {
                             Task {
                                 office365Busy = true
+                                defer { office365Busy = false }
                                 await store.syncOffice365Now()
-                                office365Busy = false
                             }
                         }
                         .buttonStyle(.bordered)
@@ -179,12 +179,39 @@ struct SettingsView: View {
                             Button("Sign out", role: .destructive) {
                                 Task {
                                     office365Busy = true
+                                    defer { office365Busy = false }
                                     await store.signOutMicrosoft365()
-                                    office365Busy = false
                                 }
                             }
                             .buttonStyle(.bordered)
                             .disabled(office365Busy || store.office365IsSyncing)
+                        }
+                    }
+
+                    // Escape hatch: unlock grayed-out buttons if Graph/MSAL hangs.
+                    if store.office365IsSyncing || office365Busy {
+                        HStack(spacing: 10) {
+                            if let started = store.office365SyncStartedAt {
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    let elapsed = Int(context.date.timeIntervalSince(started))
+                                    Text(elapsed >= 15
+                                         ? "Still syncing (\(elapsed)s) — you can cancel"
+                                         : "Syncing… \(elapsed)s")
+                                        .font(.caption)
+                                        .foregroundStyle(elapsed >= 15 ? .orange : .secondary)
+                                }
+                            } else {
+                                Text("Syncing…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Cancel sync") {
+                                store.cancelOffice365Sync()
+                                office365Busy = false
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.orange)
                         }
                     }
                 }

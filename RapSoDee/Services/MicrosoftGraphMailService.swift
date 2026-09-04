@@ -5,6 +5,15 @@ enum MicrosoftGraphMailService {
     private static let graphRoot = "https://graph.microsoft.com/v1.0"
     private static let recentLimit = Office365Defaults.recentLimit
 
+    /// Bounded Graph HTTP — avoids indefinite hangs that leave Settings buttons grayed out.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
     struct GraphSyncResult {
         var foldersFetched: Int
         var messagesFetched: Int
@@ -59,10 +68,12 @@ enum MicrosoftGraphMailService {
         )
         all.append(contentsOf: sent)
 
+        // Empty Inbox is success — never hang treating 0 messages as a failure.
+        let status = "Synced \(all.count) messages via Microsoft Graph (Inbox + Sent)"
         let result = GraphSyncResult(
             foldersFetched: 2,
             messagesFetched: all.count,
-            status: "Synced \(all.count) messages via Microsoft Graph (Inbox + Sent)",
+            status: status,
             signedInEmail: accountEmail
         )
         return (all, result)
@@ -113,7 +124,7 @@ enum MicrosoftGraphMailService {
         isDraft: Bool
     ) async throws -> [MailMessage] {
         struct GraphList: Decodable {
-            var value: [GraphMessage]
+            var value: [GraphMessage]?
         }
         let select = "id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
         let list: GraphList = try await getJSON(
@@ -126,7 +137,7 @@ enum MicrosoftGraphMailService {
             ]
         )
 
-        return list.value.map { gm in
+        return (list.value ?? []).map { gm in
             mapMessage(
                 gm,
                 accountID: accountID,
@@ -218,12 +229,18 @@ enum MicrosoftGraphMailService {
 
     private static func getJSON<T: Decodable>(path: String, accessToken: String, query: [String: String] = [:]) async throws -> T {
         let url = try makeURL(path: path, query: query)
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw mapSessionError(error)
+        }
         try throwIfNeeded(response: response, data: data)
         do {
             return try JSONDecoder().decode(T.self, from: data)
@@ -234,13 +251,19 @@ enum MicrosoftGraphMailService {
 
     private static func postJSON(path: String, accessToken: String, body: [String: Any]) async throws {
         let url = try makeURL(path: path, query: [:])
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw mapSessionError(error)
+        }
         try throwIfNeeded(response: response, data: data)
     }
 
@@ -255,14 +278,27 @@ enum MicrosoftGraphMailService {
     enum GraphError: LocalizedError {
         case unexpected(String)
         case http(Int, String)
+        case timedOut(String)
         var errorDescription: String? {
             switch self {
             case .unexpected(let s): return s
             case .http(let code, let body):
                 if body.count < 500 { return "Graph HTTP \(code): \(body)" }
                 return "Graph HTTP \(code)"
+            case .timedOut(let s): return s
             }
         }
+    }
+
+    private static func mapSessionError(_ error: Error) -> Error {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain,
+           ns.code == NSURLErrorTimedOut
+            || ns.code == NSURLErrorNetworkConnectionLost
+            || ns.code == NSURLErrorNotConnectedToInternet {
+            return GraphError.timedOut("Microsoft Graph request timed out. Try Sync now again.")
+        }
+        return error
     }
 }
 
