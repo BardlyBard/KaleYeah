@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var notificationPolicy = "focusAware"
     @State private var gmailEmail = GmailDefaults.defaultEmail
     @State private var gmailAppPassword = ""
+    @State private var gmailSecureFieldID = UUID()
     @State private var gmailBusy = false
 
     var body: some View {
@@ -20,9 +21,22 @@ struct SettingsView: View {
             Form {
                 Section("Accounts — Gmail") {
                     TextField("Email", text: $gmailEmail)
-                        .textContentType(.username)
-                    SecureField("Gmail App Password", text: $gmailAppPassword)
-                        .textContentType(.password)
+                        // Avoid .username/.password content types in Form — they break binding updates on macOS.
+                    MacSecureField(text: $gmailAppPassword, placeholder: "Gmail App Password")
+                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .id(gmailSecureFieldID)
+                    HStack {
+                        if gmailPasswordTrimmed.isEmpty {
+                            Text("No password entered")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Password entered (\(gmailPasswordTrimmed.count) characters)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
                     Text("Create an App Password at Google Account → Security (2FA required). Stored only in macOS Keychain — never committed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -52,22 +66,19 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                     }
 
+                    // Standard Form buttons — MuseCapsule can swallow clicks inside Form rows.
                     HStack(spacing: 10) {
                         Button(store.gmailAccount() == nil ? "Add Gmail" : "Save Password") {
                             Task { await saveGmail() }
                         }
-                        .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
-                        .disabled(gmailBusy || gmailAppPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canSaveGmail)
 
                         Button("Test connection") {
-                            Task {
-                                gmailBusy = true
-                                await store.testGmailConnection()
-                                gmailBusy = false
-                            }
+                            Task { await testGmailFromSettings() }
                         }
-                        .buttonStyle(MuseCapsuleButtonStyle())
-                        .disabled(store.gmailAccount() == nil || gmailBusy || store.gmailIsSyncing)
+                        .buttonStyle(.bordered)
+                        .disabled(!canTestGmail)
 
                         Button("Sync now") {
                             Task {
@@ -76,14 +87,15 @@ struct SettingsView: View {
                                 gmailBusy = false
                             }
                         }
-                        .buttonStyle(MuseCapsuleButtonStyle())
-                        .disabled(store.gmailAccount() == nil || gmailBusy || store.gmailIsSyncing)
+                        .buttonStyle(.bordered)
+                        .disabled(!canSyncGmail)
                     }
 
                     if store.gmailAccount() != nil {
                         Button("Remove Gmail account", role: .destructive) {
                             store.removeGmailAccount()
                             gmailAppPassword = ""
+                            gmailSecureFieldID = UUID()
                             gmailEmail = GmailDefaults.defaultEmail
                         }
                     }
@@ -278,18 +290,53 @@ struct SettingsView: View {
     }
 
 
+    private var gmailEmailTrimmed: String {
+        gmailEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var gmailPasswordTrimmed: String {
+        gmailAppPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSaveGmail: Bool {
+        !gmailBusy
+            && !gmailEmailTrimmed.isEmpty
+            && !gmailPasswordTrimmed.isEmpty
+    }
+
+    private var canTestGmail: Bool {
+        guard !gmailBusy, !store.gmailIsSyncing, !gmailEmailTrimmed.isEmpty else { return false }
+        if !gmailPasswordTrimmed.isEmpty { return true }
+        return KeychainCredentialStore.hasCredentials(forEmail: gmailEmailTrimmed)
+    }
+
+    private var canSyncGmail: Bool {
+        guard let account = store.gmailAccount(), !gmailBusy, !store.gmailIsSyncing else { return false }
+        return KeychainCredentialStore.hasCredentials(forEmail: account.email)
+    }
+
     private func saveGmail() async {
         gmailBusy = true
+        store.gmailLastError = nil
         do {
-            try store.saveGmailCredentials(email: gmailEmail, appPassword: gmailAppPassword)
+            try store.saveGmailCredentials(email: gmailEmailTrimmed, appPassword: gmailPasswordTrimmed)
             gmailAppPassword = ""
-            await store.testGmailConnection()
+            gmailSecureFieldID = UUID()
+            store.gmailSyncStatus = "Credentials saved in Keychain."
+            await store.testGmailConnection(email: gmailEmailTrimmed)
             if store.gmailLastError == nil {
                 await store.syncGmailNow()
             }
         } catch {
             store.gmailLastError = error.localizedDescription
         }
+        gmailBusy = false
+    }
+
+    private func testGmailFromSettings() async {
+        gmailBusy = true
+        let fieldPass = gmailPasswordTrimmed.isEmpty ? nil : gmailPasswordTrimmed
+        await store.testGmailConnection(email: gmailEmailTrimmed, appPassword: fieldPass)
         gmailBusy = false
     }
 

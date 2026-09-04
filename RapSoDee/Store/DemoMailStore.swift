@@ -469,13 +469,23 @@ final class DemoMailStore: MailStore {
         gmailLastError = nil
     }
 
-    func testGmailConnection() async {
-        guard let account = gmailAccount() else {
-            gmailLastError = "Add a Gmail account first"
+    /// Test IMAP/SMTP. Prefer an in-field App Password when provided; otherwise use Keychain.
+    /// Does not require an existing account card when email + password (field or Keychain) are available.
+    func testGmailConnection(email overrideEmail: String? = nil, appPassword overridePassword: String? = nil) async {
+        let email = (overrideEmail ?? gmailAccount()?.email ?? GmailSyncService.storedEmail() ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty else {
+            gmailLastError = "Enter a Gmail address"
             return
         }
-        guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
-            gmailLastError = "No App Password in Keychain"
+        let fieldPass = (overridePassword ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let password: String
+        if !fieldPass.isEmpty {
+            password = fieldPass
+        } else if let stored = KeychainCredentialStore.password(forEmail: email) {
+            password = stored
+        } else {
+            gmailLastError = "Enter an App Password or save credentials first"
             gmailNeedsSetup = true
             return
         }
@@ -483,7 +493,7 @@ final class DemoMailStore: MailStore {
         gmailLastError = nil
         gmailSyncStatus = "Testing connection…"
         do {
-            try await GmailSyncService.testConnection(email: account.email, password: password)
+            try await GmailSyncService.testConnection(email: email, password: password)
             gmailSyncStatus = "Connection OK (IMAP + SMTP)"
         } catch {
             gmailLastError = error.localizedDescription

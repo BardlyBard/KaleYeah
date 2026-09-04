@@ -21,6 +21,7 @@
 		84749A185DB597F106310035 /* DemoMailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */; };
 		85A9A046D31C0C329CD61E35 /* ReadingPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */; };
 		9747425BBC2BCB2BF0E1488A /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = 1D7A8B60201D7BD9EAD048A6 /* Sounds */; };
+		99040D356EC8DD63B1E52697 /* MacSecureField.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD343817DC7561DB08A98E3 /* MacSecureField.swift */; };
 		A06737250A686C19726910AC /* RapSoDeeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */; };
 		A8E3DD59017D6E4B37F8DE04 /* KeyboardCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 790C971D69A2BA935411A556 /* KeyboardCommands.swift */; };
 		C8FA99B942BF2C51BD046893 /* MailboxLadderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */; };
@@ -58,6 +59,7 @@
 		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
 		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleIMAPClient.swift; sourceTree = "<group>"; };
+		DDD343817DC7561DB08A98E3 /* MacSecureField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSecureField.swift; sourceTree = "<group>"; };
 		FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailboxLadderView.swift; sourceTree = "<group>"; };
 		FB2F3EECDB44CDE607551E15 /* DemoMailStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoMailStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -115,6 +117,7 @@
 				36684E996FD0A65878AA7714 /* FilePickerSheet.swift */,
 				11F578DAC374C39E9BB29BE1 /* FlagMenuContent.swift */,
 				790C971D69A2BA935411A556 /* KeyboardCommands.swift */,
+				DDD343817DC7561DB08A98E3 /* MacSecureField.swift */,
 				31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */,
 			);
 			path = Components;
@@ -247,6 +250,7 @@
 				F9F39F4348160FE98CF3C892 /* GmailSyncService.swift in Sources */,
 				A8E3DD59017D6E4B37F8DE04 /* KeyboardCommands.swift in Sources */,
 				EB108FA3EF5262901A68D864 /* KeychainCredentialStore.swift in Sources */,
+				99040D356EC8DD63B1E52697 /* MacSecureField.swift in Sources */,
 				557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */,
 				6746D15381E028C1AAB62B98 /* MailStore.swift in Sources */,
 				2A1E9321BABD97AD78548B6D /* MailTLSConnection.swift in Sources */,
