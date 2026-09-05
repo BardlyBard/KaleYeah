@@ -457,6 +457,7 @@ final class DemoMailStore: MailStore {
                     accounts[i].name = "Gmail"
                 }
             }
+            ensureStandardMailFolders(for: existing.id, baseSort: -10)
             GmailSyncService.rememberAccount(email: email, id: existing.id)
             return accounts.first { $0.isLiveGmail }!
         }
@@ -650,9 +651,51 @@ final class DemoMailStore: MailStore {
                 office365SyncStatus = "Optional: Sign in with Microsoft in Settings → Microsoft 365."
             }
         }
+
+        // Accounts exist but inbox still empty (failed/empty Graph pass) — try once more
+        // so launch never leaves Kale Yeah permanently blank without attempting sync.
+        if !accounts.isEmpty && messages.isEmpty && !office365NeedsSetup {
+            await syncOffice365Now()
+        } else if !accounts.isEmpty && messages.isEmpty && !gmailNeedsSetup {
+            await syncGmailNow()
+        }
+    }
+
+    /// Recreate Inbox/Sent/Drafts/Archive/Trash if an account shell lost its folders
+    /// (e.g. after demo seed removal left selection pointing at dead IDs).
+    private func ensureStandardMailFolders(for accountID: UUID, baseSort: Int) {
+        let kinds: [(FolderKind, String, Int, Bool)] = [
+            (.inbox, "Inbox", baseSort, true),
+            (.sent, "Sent", baseSort + 1, false),
+            (.drafts, "Drafts", baseSort + 2, false),
+            (.archive, "Archive", baseSort + 3, false),
+            (.trash, "Trash", baseSort + 4, false),
+        ]
+        for (kind, name, order, pinned) in kinds {
+            if folders.contains(where: { $0.accountID == accountID && $0.kind == kind }) { continue }
+            folders.append(
+                MailFolder(accountID: accountID, name: name, kind: kind, sortOrder: order, isPinned: pinned)
+            )
+        }
+    }
+
+    /// True when `selection` still resolves to a live folder / account after demo removal.
+    func isValidSelection(_ selection: LadderSelection) -> Bool {
+        switch selection {
+        case .unifiedInbox, .approve:
+            return true
+        case .accountInbox(let accountID):
+            return accounts.contains(where: { $0.id == accountID })
+        case .folder(let id):
+            return folders.contains(where: { $0.id == id })
+        }
     }
 
     private func liveFolderIDs(for accountID: UUID) -> IMAPFolderIDs? {
+        ensureStandardMailFolders(
+            for: accountID,
+            baseSort: accounts.first(where: { $0.id == accountID })?.isLiveOffice365 == true ? -20 : -10
+        )
         guard
             let inbox = folders.first(where: { $0.accountID == accountID && $0.kind == .inbox })?.id,
             let sent = folders.first(where: { $0.accountID == accountID && $0.kind == .sent })?.id,
@@ -723,6 +766,7 @@ final class DemoMailStore: MailStore {
                 }
                 accounts[i].tintHex = accounts[i].tintHex.isEmpty ? Office365Defaults.tintHex : accounts[i].tintHex
             }
+            ensureStandardMailFolders(for: existing.id, baseSort: -20)
             Office365SyncService.rememberAccount(email: email, id: existing.id)
             return accounts.first { $0.isLiveOffice365 }!
         }
@@ -936,6 +980,7 @@ final class DemoMailStore: MailStore {
                 var email: String
                 var messages: [MailMessage]
                 var status: String
+                var prunableFolderIDs: Set<UUID>
             }
             let payload: SyncPayload = try await withOffice365SyncTimeout(seconds: timeout) {
                 let token = try await MSALAuthService.shared.acquireAccessToken(
@@ -943,21 +988,27 @@ final class DemoMailStore: MailStore {
                     loginHint: accountEmailHint
                 )
                 let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
-                let (fetched, result) = try await MicrosoftGraphMailService.sync(
+                let (fetched, result, prunable) = try await MicrosoftGraphMailService.sync(
                     accessToken: token,
                     accountID: accountID,
                     folderIDs: folderIDs,
                     accountEmail: email
                 )
-                return SyncPayload(email: email, messages: fetched, status: result.status)
+                return SyncPayload(
+                    email: email,
+                    messages: fetched,
+                    status: result.status,
+                    prunableFolderIDs: prunable
+                )
             }
             if payload.email.lowercased() != accountEmailHint.lowercased() {
                 _ = ensureOffice365Account(email: payload.email, id: accountID)
             }
-            let synced = Set([folderIDs.inbox, folderIDs.sent])
+            // Only prune folders Graph actually listed successfully. Never treat a total
+            // failure / empty error payload as authority to wipe Kale Yeah mail.
             let newOnes = upsertSyncedMessages(
                 accountID: accountID,
-                syncedFolderIDs: synced,
+                syncedFolderIDs: payload.prunableFolderIDs,
                 fetched: payload.messages,
                 previousIDs: previousIDs
             )
@@ -1081,7 +1132,8 @@ final class DemoMailStore: MailStore {
     // MARK: - Sync upsert / dedupe
 
     /// Merge fetched live mail by `remoteID` (fallback: internetMessageId). Preserves local UUID,
-    /// named flags, and snooze. Prunes stale rows only in synced folders.
+    /// named flags, and snooze. Prunes stale rows only in successfully synced folders, and never
+    /// when `fetched` is empty (keeps existing mail on empty/error responses).
     @discardableResult
     private func upsertSyncedMessages(
         accountID: UUID,
@@ -1160,19 +1212,26 @@ final class DemoMailStore: MailStore {
             }
         }
 
-        // Drop stale copies in synced folders that were not returned this pass.
-        messages.removeAll { m in
-            guard m.accountID == accountID else { return false }
-            guard syncedFolderIDs.contains(m.folderID) else { return false }
-            guard m.snoozeUntil == nil else { return false }
-            if let r = normalizedRemoteID(m.remoteID) {
-                return !seenRemote.contains(r)
+        // Drop stale copies only in folders that were intentionally replaced by this
+        // successful fetch. Never prune when the fetch set is empty — an empty/error
+        // response must not wipe existing Gmail or Kale Yeah mail.
+        if !fetched.isEmpty, !syncedFolderIDs.isEmpty {
+            let fetchedIDs = Set(fetched.map(\.id))
+            messages.removeAll { m in
+                guard m.accountID == accountID else { return false }
+                guard syncedFolderIDs.contains(m.folderID) else { return false }
+                guard m.snoozeUntil == nil else { return false }
+                // Keep rows we just upserted / appended in this pass.
+                if fetchedIDs.contains(m.id) { return false }
+                if let r = normalizedRemoteID(m.remoteID) {
+                    return !seenRemote.contains(r)
+                }
+                if let i = normalizedInternetMessageId(m.internetMessageId) {
+                    return !seenInternet.contains(i)
+                }
+                // Legacy rows without remote keys: remove from synced folders on replace.
+                return true
             }
-            if let i = normalizedInternetMessageId(m.internetMessageId) {
-                return !seenInternet.contains(i)
-            }
-            // Legacy rows without remote keys: remove from synced folders on replace.
-            return true
         }
 
         deduplicateMessagesByRemoteID(accountID: accountID)

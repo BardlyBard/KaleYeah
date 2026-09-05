@@ -43,40 +43,69 @@ enum MicrosoftGraphMailService {
         accountID: UUID,
         folderIDs: IMAPFolderIDs,
         accountEmail: String
-    ) async throws -> (messages: [MailMessage], result: GraphSyncResult) {
+    ) async throws -> (messages: [MailMessage], result: GraphSyncResult, prunableFolderIDs: Set<UUID>) {
         var all: [MailMessage] = []
+        var prunable: Set<UUID> = []
+        var folderErrors: [String] = []
 
-        let inbox = try await listFolderMessages(
-            folderPath: "/me/mailFolders/inbox/messages",
-            accessToken: accessToken,
-            accountID: accountID,
-            folderID: folderIDs.inbox,
-            accountEmail: accountEmail,
-            mailboxKey: "inbox",
-            isDraft: false
-        )
-        all.append(contentsOf: inbox)
+        // Fetch folders independently so one failure does not wipe the other via prune.
+        do {
+            let inbox = try await listFolderMessages(
+                folderPath: "/me/mailFolders/inbox/messages",
+                accessToken: accessToken,
+                accountID: accountID,
+                folderID: folderIDs.inbox,
+                accountEmail: accountEmail,
+                mailboxKey: "inbox",
+                isDraft: false
+            )
+            all.append(contentsOf: inbox)
+            prunable.insert(folderIDs.inbox)
+        } catch {
+            folderErrors.append("Inbox: \(error.localizedDescription)")
+        }
 
-        let sent = try await listFolderMessages(
-            folderPath: "/me/mailFolders/sentitems/messages",
-            accessToken: accessToken,
-            accountID: accountID,
-            folderID: folderIDs.sent,
-            accountEmail: accountEmail,
-            mailboxKey: "sentitems",
-            isDraft: false
-        )
-        all.append(contentsOf: sent)
+        do {
+            let sent = try await listFolderMessages(
+                folderPath: "/me/mailFolders/sentitems/messages",
+                accessToken: accessToken,
+                accountID: accountID,
+                folderID: folderIDs.sent,
+                accountEmail: accountEmail,
+                mailboxKey: "sentitems",
+                isDraft: false
+            )
+            all.append(contentsOf: sent)
+            prunable.insert(folderIDs.sent)
+        } catch {
+            folderErrors.append("Sent: \(error.localizedDescription)")
+        }
 
-        // Empty Inbox is success — never hang treating 0 messages as a failure.
-        let status = "Synced \(all.count) messages via Microsoft Graph (Inbox + Sent)"
+        // If every folder fetch failed, surface the error and do NOT return an empty
+        // "success" — callers must keep existing mail.
+        if prunable.isEmpty {
+            let detail = folderErrors.isEmpty ? "No folders synced" : folderErrors.joined(separator: " | ")
+            throw GraphError.unexpected("Graph sync failed — \(detail)")
+        }
+
+        var status = "Synced \(all.count) messages via Microsoft Graph"
+        if prunable.contains(folderIDs.inbox) && prunable.contains(folderIDs.sent) {
+            status += " (Inbox + Sent)"
+        } else if prunable.contains(folderIDs.inbox) {
+            status += " (Inbox only)"
+        } else {
+            status += " (Sent only)"
+        }
+        if !folderErrors.isEmpty {
+            status += " — partial: \(folderErrors.joined(separator: " | "))"
+        }
         let result = GraphSyncResult(
-            foldersFetched: 2,
+            foldersFetched: prunable.count,
             messagesFetched: all.count,
             status: status,
             signedInEmail: accountEmail
         )
-        return (all, result)
+        return (all, result, prunable)
     }
 
     // MARK: - Send
@@ -390,11 +419,19 @@ enum MicrosoftGraphMailService {
             let id = stableMessageID(graphID: graphID)
             var attachments: [MailAttachment] = []
             if gm.hasAttachments == true {
-                attachments = try await fetchFileAttachments(
-                    messageGraphID: graphID,
-                    accessToken: accessToken,
-                    mailMessageID: id
-                )
+                // Do not call Graph /attachments during list sync — N extra round-trips
+                // (and contentBytes) blew the Office365 timeout and left Kale Yeah empty.
+                // Stub keeps the "Has attachments" filter working; bodies still sync.
+                attachments = [
+                    MailAttachment(
+                        id: UUID(),
+                        filename: "Attachment",
+                        mimeType: "application/octet-stream",
+                        byteSize: 0,
+                        localPath: nil,
+                        remoteID: nil
+                    )
+                ]
             }
             out.append(
                 mapMessage(
@@ -415,16 +452,21 @@ enum MicrosoftGraphMailService {
     private static func fetchFileAttachments(
         messageGraphID: String,
         accessToken: String,
-        mailMessageID: UUID
+        mailMessageID: UUID,
+        includeBytes: Bool = true
     ) async throws -> [MailAttachment] {
         struct GraphAttachmentList: Decodable {
             var value: [GraphAttachment]?
         }
         let encodedID = messageGraphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? messageGraphID
+        // Metadata-only during inbox sync — contentBytes payloads are huge and slow.
+        let query: [String: String] = includeBytes
+            ? [:]
+            : ["$select": "id,name,contentType,size,@odata.type"]
         let list: GraphAttachmentList = try await getJSON(
             path: "/me/messages/\(encodedID)/attachments",
             accessToken: accessToken,
-            query: [:]
+            query: query
         )
         var result: [MailAttachment] = []
         for item in list.value ?? [] {
@@ -434,7 +476,8 @@ enum MicrosoftGraphMailService {
             let mime = item.contentType ?? AttachmentStore.mimeType(forFilename: filename)
             var localPath: String? = nil
             var byteSize = item.size ?? 0
-            if let b64 = item.contentBytes, !b64.isEmpty,
+            if includeBytes,
+               let b64 = item.contentBytes, !b64.isEmpty,
                let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) {
                 byteSize = data.count
                 localPath = try? AttachmentStore.save(data: data, filename: filename, messageID: mailMessageID)

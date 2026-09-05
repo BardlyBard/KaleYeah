@@ -60,7 +60,25 @@ struct ContentView: View {
         }
         .onAppear {
             hydrateFlagsIfNeeded()
-            Task { await store.bootstrapLiveAccountsOnLaunch() }
+            // Demo removal can leave a stale folder UUID selected — snap back to Unified Inbox.
+            if !store.isValidSelection(selection) {
+                selection = .unifiedInbox
+            }
+            Task {
+                await store.bootstrapLiveAccountsOnLaunch()
+                if !store.isValidSelection(selection) {
+                    selection = .unifiedInbox
+                }
+                // Accounts present but still no mail after bootstrap — force one more sync pass.
+                if !store.accounts.isEmpty && store.messages.isEmpty {
+                    await store.syncAllConnectedAccounts()
+                }
+            }
+        }
+        .onChange(of: store.folders.count) { _, _ in
+            if !store.isValidSelection(selection) {
+                selection = .unifiedInbox
+            }
         }
         .task {
             // Auto-sync every 5 minutes while the window is open; skip if a sync is already running.
