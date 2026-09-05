@@ -961,6 +961,7 @@ final class DemoMailStore: MailStore {
             if office365SyncStatus.isEmpty {
                 office365SyncStatus = "Optional: Sign in with Microsoft in Settings → Microsoft 365."
             }
+            persistOffice365SyncProbe(office365SyncStatus)
         }
 
         // Accounts exist but inbox still empty (failed/empty Graph pass) — try once more
@@ -1348,6 +1349,7 @@ final class DemoMailStore: MailStore {
             if generation == office365SyncGeneration {
                 office365IsSyncing = false
                 office365SyncStartedAt = nil
+                persistOffice365SyncProbe(office365SyncStatus)
             }
         }
         do {
@@ -1529,6 +1531,19 @@ final class DemoMailStore: MailStore {
         }
     }
 
+
+    private func persistOffice365SyncProbe(_ status: String) {
+        UserDefaults.standard.set(status, forKey: "rapSoDee.office365.lastSyncStatus")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "rapSoDee.office365.lastSyncAt")
+        UserDefaults.standard.synchronize()
+        // Also write a plain file — UserDefaults may not flush to the container plist promptly.
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let url = dir.appendingPathComponent("RapSoDeeMailCache/lastOffice365Sync.txt")
+        let line = "\(ISO8601DateFormatter().string(from: Date()))\t\(status)\n"
+        try? line.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     private func performOffice365Sync(generation: Int) async {
         restoreOffice365AccountShellIfNeeded()
         guard generation == office365SyncGeneration, !Task.isCancelled else { return }
@@ -1537,10 +1552,12 @@ final class DemoMailStore: MailStore {
         office365SyncStartedAt = Date()
         office365LastError = nil
         office365SyncStatus = "Syncing Microsoft 365 via Graph (headers only)…"
+        persistOffice365SyncProbe(office365SyncStatus)
         defer {
             if generation == office365SyncGeneration {
                 office365IsSyncing = false
                 office365SyncStartedAt = nil
+                persistOffice365SyncProbe(office365SyncStatus)
             }
         }
 
@@ -1643,6 +1660,7 @@ final class DemoMailStore: MailStore {
                 removedRemoteIDs: payload.removedRemoteIDs
             )
             office365SyncStatus = payload.status
+            persistOffice365SyncProbe(payload.status)
             office365NeedsSetup = false
             office365LastError = nil
             for msg in newOnes.prefix(3) {
