@@ -111,7 +111,7 @@ enum MSALAuthError: LocalizedError {
         case .missingClientID:
             return "Paste your Entra Application (client) ID in Settings → Microsoft 365 first."
         case .noAccount:
-            return "Not signed in with Microsoft. Use Sign in with Microsoft."
+            return "Sign in expired — use Settings → Sign in with device code"
         case .noPresentingWindow:
             return "No window available to present Microsoft sign-in."
         case .cancelled:
@@ -403,7 +403,7 @@ final class MSALAuthService {
     }
 
     /// Access token for SMTP AUTH XOAUTH2. Graph tokens are a different audience and will not work.
-    func acquireSMTPAccessToken(interactiveIfNeeded: Bool = true, loginHint: String? = nil) async throws -> String {
+    func acquireSMTPAccessToken(interactiveIfNeeded: Bool = false, loginHint: String? = nil) async throws -> String {
         rebuildApplicationIfPossible()
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 

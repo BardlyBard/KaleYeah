@@ -1209,6 +1209,47 @@ final class DemoMailStore: MailStore {
         }
     }
 
+    private static let signInExpiredSendMessage = "Sign in expired — use Settings → Sign in with device code"
+
+    /// Send must never open MSAL interactive / browser auth. Silent token only.
+    private func failSendSignInExpired(_ detail: String? = nil) {
+        office365NeedsSetup = true
+        let msg = Self.signInExpiredSendMessage
+        office365SyncStatus = msg
+        if let detail, !detail.isEmpty {
+            office365LastError = "\(msg)\n\(detail)"
+        } else {
+            office365LastError = msg
+        }
+    }
+
+    private static func isSilentAuthFailure(_ error: Error) -> Bool {
+        if let auth = error as? MSALAuthError {
+            switch auth {
+            case .noAccount, .missingClientID:
+                return true
+            case .cancelled, .noPresentingWindow:
+                return false
+            case .underlying(let message):
+                let lower = message.lowercased()
+                return lower.contains("interaction_required")
+                    || lower.contains("not signed")
+                    || lower.contains("no account")
+                    || lower.contains("expired")
+                    || lower.contains("login required")
+                    || lower.contains("consent_required")
+            }
+        }
+        let lower = error.localizedDescription.lowercased()
+        return lower.contains("interaction_required")
+            || lower.contains("not signed")
+            || lower.contains("no account")
+            || lower.contains("client id")
+            || lower.contains("expired")
+            || lower.contains("login required")
+            || lower.contains("consent_required")
+    }
+
     private func sendOffice365Compose(_ draft: ComposeDraft) async {
         guard let account = account(for: draft.accountID), account.isLiveOffice365 else {
             insertLocalSent(draft)
@@ -1232,7 +1273,8 @@ final class DemoMailStore: MailStore {
                 status = try await sendOffice365ViaSMTP(draft: draft, account: account)
             } else {
                 do {
-                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: true, loginHint: account.email)
+                    // Silent only — never acquireTokenInteractive from Send.
+                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
                     let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
                     status = try await MicrosoftGraphMailService.sendMail(
                         accessToken: token,
@@ -1242,12 +1284,20 @@ final class DemoMailStore: MailStore {
                         signature: account.signature
                     )
                 } catch {
-                    // Graph API failure → try SMTP OAuth (NDRs are not visible in-app).
+                    if Self.isSilentAuthFailure(error) {
+                        failSendSignInExpired(error.localizedDescription)
+                        return
+                    }
+                    // Graph API failure → try SMTP OAuth (NDRs are not visible in-app). Still silent-only.
                     let graphDetail = error.localizedDescription
                     office365SyncStatus = "Graph send failed — trying SMTP XOAUTH2… (\(String(graphDetail.prefix(120))))"
                     do {
                         status = try await sendOffice365ViaSMTP(draft: draft, account: account)
                     } catch {
+                        if Self.isSilentAuthFailure(error) {
+                            failSendSignInExpired("Graph: \(graphDetail)\nSMTP: \(error.localizedDescription)")
+                            return
+                        }
                         let smtpDetail = error.localizedDescription
                         office365LastError = "Graph: \(graphDetail)\nSMTP: \(smtpDetail)"
                         let short = smtpDetail.count > 200 ? String(smtpDetail.prefix(197)) + "…" : smtpDetail
@@ -1260,6 +1310,10 @@ final class DemoMailStore: MailStore {
             office365SyncStatus = status
             office365LastError = nil
         } catch {
+            if Self.isSilentAuthFailure(error) {
+                failSendSignInExpired(error.localizedDescription)
+                return
+            }
             let detail = error.localizedDescription
             office365LastError = detail
             let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
@@ -1268,8 +1322,9 @@ final class DemoMailStore: MailStore {
     }
 
     private func sendOffice365ViaSMTP(draft: ComposeDraft, account: MailAccount) async throws -> String {
+        // Silent only — never open browser / interactive MSAL from Send.
         let smtpToken = try await MSALAuthService.shared.acquireSMTPAccessToken(
-            interactiveIfNeeded: true,
+            interactiveIfNeeded: false,
             loginHint: account.email
         )
         return try await MicrosoftGraphMailService.sendViaSMTPOAuth(
