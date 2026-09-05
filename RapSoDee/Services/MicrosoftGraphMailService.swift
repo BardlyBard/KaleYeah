@@ -704,7 +704,11 @@ enum MicrosoftGraphMailService {
     }
 
     private static func mapSessionError(_ error: Error) -> Error {
+        if error is CancellationError { return error }
         let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled {
+            return CancellationError()
+        }
         if ns.domain == NSURLErrorDomain,
            ns.code == NSURLErrorTimedOut
             || ns.code == NSURLErrorNetworkConnectionLost

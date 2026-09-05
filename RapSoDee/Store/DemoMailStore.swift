@@ -843,26 +843,65 @@ final class DemoMailStore: MailStore {
             office365NeedsSetup = true
             return
         }
+        office365InFlightTask?.cancel()
+        office365SyncGeneration += 1
+        let generation = office365SyncGeneration
+        let work = Task { @MainActor in
+            await self.performSignInMicrosoft365(generation: generation)
+        }
+        office365InFlightTask = work
+        await work.value
+        if office365SyncGeneration == generation {
+            office365InFlightTask = nil
+        }
+    }
+
+    private func performSignInMicrosoft365(generation: Int) async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
         office365SyncStatus = "Signing in with Microsoft…"
         defer {
-            office365IsSyncing = false
-            office365SyncStartedAt = nil
+            if generation == office365SyncGeneration {
+                office365IsSyncing = false
+                office365SyncStartedAt = nil
+            }
         }
         do {
-            _ = try await MSALAuthService.shared.signIn(loginHint: Office365Defaults.defaultEmail)
-            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            // Bound interactive sign-in so a hung ASWebAuthenticationSession cannot spin forever.
+            _ = try await withOffice365SyncTimeout(seconds: 90) {
+                try await MSALAuthService.shared.signIn(loginHint: Office365Defaults.defaultEmail)
+            }
+            try Task.checkCancellation()
+            guard generation == office365SyncGeneration else { return }
+            let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            }
+            try Task.checkCancellation()
+            guard generation == office365SyncGeneration else { return }
             let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            guard generation == office365SyncGeneration else { return }
             _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email)"
-            // Clear busy before nested sync so syncOffice365Now can set its own defer.
             office365IsSyncing = false
             office365SyncStartedAt = nil
             await syncOffice365Now()
+        } catch is CancellationError {
+            if generation == office365SyncGeneration {
+                office365SyncStatus = "Sign-in cancelled"
+            }
+        } catch is Office365SyncTimeoutError {
+            guard generation == office365SyncGeneration else { return }
+            _ = MSALAuthService.cancelPendingAuth()
+            office365LastError = "Sign-in timed out."
+            office365SyncStatus = "Sync timed out — try again"
         } catch {
+            guard generation == office365SyncGeneration else { return }
+            if Self.isCancelLike(error) {
+                office365SyncStatus = "Sign-in cancelled"
+                return
+            }
             office365LastError = error.localizedDescription
             office365SyncStatus = "Sign-in failed"
         }
@@ -885,28 +924,63 @@ final class DemoMailStore: MailStore {
             office365NeedsSetup = true
             return
         }
+        office365InFlightTask?.cancel()
+        office365SyncGeneration += 1
+        let generation = office365SyncGeneration
+        let work = Task { @MainActor in
+            await self.performSignInMicrosoft365WithDeviceCode(generation: generation, onPrompt: onPrompt)
+        }
+        office365InFlightTask = work
+        await work.value
+        if office365SyncGeneration == generation {
+            office365InFlightTask = nil
+        }
+    }
+
+    private func performSignInMicrosoft365WithDeviceCode(
+        generation: Int,
+        onPrompt: @MainActor @escaping (MSALDeviceCodePrompt) -> Void
+    ) async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
         office365SyncStatus = "Starting device code sign-in…"
         defer {
-            office365IsSyncing = false
-            office365SyncStartedAt = nil
+            if generation == office365SyncGeneration {
+                office365IsSyncing = false
+                office365SyncStartedAt = nil
+            }
         }
         do {
             _ = try await MSALAuthService.shared.signInWithDeviceCode(
                 loginHint: Office365Defaults.defaultEmail,
                 onPrompt: onPrompt
             )
-            let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            try Task.checkCancellation()
+            guard generation == office365SyncGeneration else { return }
+            let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+            }
+            try Task.checkCancellation()
+            guard generation == office365SyncGeneration else { return }
             let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            guard generation == office365SyncGeneration else { return }
             _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email) (device code)"
             office365IsSyncing = false
             office365SyncStartedAt = nil
             await syncOffice365Now()
+        } catch is CancellationError {
+            if generation == office365SyncGeneration {
+                office365SyncStatus = "Sign-in cancelled"
+            }
         } catch {
+            guard generation == office365SyncGeneration else { return }
+            if Self.isCancelLike(error) {
+                office365SyncStatus = "Sign-in cancelled"
+                return
+            }
             office365LastError = error.localizedDescription
             office365SyncStatus = "Device code sign-in failed"
         }
@@ -937,13 +1011,15 @@ final class DemoMailStore: MailStore {
     }
 
     /// Escape hatch when Graph/MSAL hangs — unlocks Sign in / Sync / Sign out immediately.
-    /// Crash-safe: bump generation, cancel in-flight Task (URLSession respects cooperative cancel),
-    /// never invalidateAndCancel the shared Graph session, never force-unwrap.
+    /// Crash-safe: bump generation, cancel in-flight Task, clear busy flags on MainActor.
+    /// Never invalidateAndCancel shared URLSession. MSAL cancel is soft (flag + web-auth
+    /// dismiss); acquireToken* continuations resume at most once (Cancel crash fix).
     func cancelOffice365Sync() {
         office365SyncGeneration += 1
         let task = office365InFlightTask
         office365InFlightTask = nil
         task?.cancel()
+        // Soft-cancel only — do not tear down Graph URLSession mid-callback.
         _ = MSALAuthService.cancelPendingAuth()
         office365IsSyncing = false
         office365SyncStartedAt = nil
@@ -968,37 +1044,8 @@ final class DemoMailStore: MailStore {
 
     private func performOffice365Sync(generation: Int) async {
         restoreOffice365AccountShellIfNeeded()
-        if office365Account() == nil {
-            do {
-                let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                    try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
-                }
-                try Task.checkCancellation()
-                guard generation == office365SyncGeneration else { return }
-                let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
-                guard generation == office365SyncGeneration else { return }
-                _ = ensureOffice365Account(email: email)
-            } catch is CancellationError {
-                return
-            } catch {
-                guard generation == office365SyncGeneration else { return }
-                office365NeedsSetup = true
-                office365LastError = error.localizedDescription
-                office365SyncStatus = "Sign in with Microsoft (device code OK) in Settings → Microsoft 365"
-                return
-            }
-        }
-        guard generation == office365SyncGeneration else { return }
-        guard let account = office365Account() else {
-            office365NeedsSetup = true
-            office365SyncStatus = "Sign in with Microsoft in Settings → Microsoft 365"
-            return
-        }
-        guard let folderIDs = liveFolderIDs(for: account.id) else {
-            office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
-            office365SyncStatus = "Sync failed — folders missing"
-            return
-        }
+        guard generation == office365SyncGeneration, !Task.isCancelled else { return }
+
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
@@ -1009,49 +1056,79 @@ final class DemoMailStore: MailStore {
                 office365SyncStartedAt = nil
             }
         }
-        let previousIDs = Set(messages.filter { $0.accountID == account.id }.map(\.id))
-        let accountID = account.id
-        let accountEmailHint = account.email
-        let timeout = Self.office365SyncTimeoutSeconds
+
         do {
             struct SyncPayload: Sendable {
                 var email: String
                 var messages: [MailMessage]
                 var status: String
                 var prunableFolderIDs: Set<UUID>
+                var accountID: UUID
+                var accountEmailHint: String
+                var previousIDs: Set<UUID>
             }
-            let payload: SyncPayload = try await withOffice365SyncTimeout(seconds: timeout) {
-                // Fail fast on token — Sync must not open interactive browser (hangs Settings).
+
+            // Hard overall deadline — auto-stops so Cancel is never required for a hung spinner.
+            let payload: SyncPayload = try await withOffice365SyncTimeout(seconds: Self.office365SyncTimeoutSeconds) {
+                try Task.checkCancellation()
+                if self.office365Account() == nil {
+                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                    try Task.checkCancellation()
+                    guard generation == self.office365SyncGeneration else { throw CancellationError() }
+                    let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+                    try Task.checkCancellation()
+                    guard generation == self.office365SyncGeneration else { throw CancellationError() }
+                    _ = self.ensureOffice365Account(email: email)
+                }
+                guard generation == self.office365SyncGeneration else { throw CancellationError() }
+                guard let account = self.office365Account() else {
+                    throw MSALAuthError.noAccount
+                }
+                guard let folderIDs = self.liveFolderIDs(for: account.id) else {
+                    throw Office365SyncTimeoutError.foldersMissing
+                }
+                let previousIDs = Set(self.messages.filter { $0.accountID == account.id }.map(\.id))
+                let accountID = account.id
+                let accountEmailHint = account.email
+
                 let token = try await MSALAuthService.shared.acquireAccessToken(
                     interactiveIfNeeded: false,
                     loginHint: accountEmailHint
                 )
                 try Task.checkCancellation()
+                guard generation == self.office365SyncGeneration else { throw CancellationError() }
                 let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
                 try Task.checkCancellation()
+                guard generation == self.office365SyncGeneration else { throw CancellationError() }
                 let (fetched, result, prunable) = try await MicrosoftGraphMailService.sync(
                     accessToken: token,
                     accountID: accountID,
                     folderIDs: folderIDs,
                     accountEmail: email
                 )
+                try Task.checkCancellation()
+                guard generation == self.office365SyncGeneration else { throw CancellationError() }
                 return SyncPayload(
                     email: email,
                     messages: fetched,
                     status: result.status,
-                    prunableFolderIDs: prunable
+                    prunableFolderIDs: prunable,
+                    accountID: accountID,
+                    accountEmailHint: accountEmailHint,
+                    previousIDs: previousIDs
                 )
             }
+
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
-            if payload.email.lowercased() != accountEmailHint.lowercased() {
-                _ = ensureOffice365Account(email: payload.email, id: accountID)
+            if payload.email.lowercased() != payload.accountEmailHint.lowercased() {
+                _ = ensureOffice365Account(email: payload.email, id: payload.accountID)
             }
             let newOnes = upsertSyncedMessages(
-                accountID: accountID,
+                accountID: payload.accountID,
                 syncedFolderIDs: payload.prunableFolderIDs,
                 fetched: payload.messages,
-                previousIDs: previousIDs
+                previousIDs: payload.previousIDs
             )
             office365SyncStatus = payload.status
             office365NeedsSetup = false
@@ -1063,8 +1140,28 @@ final class DemoMailStore: MailStore {
             if generation == office365SyncGeneration {
                 office365SyncStatus = "Sync cancelled"
             }
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            if generation == office365SyncGeneration {
+                office365SyncStatus = "Sync cancelled"
+            }
+        } catch let timeout as Office365SyncTimeoutError {
+            guard generation == office365SyncGeneration else { return }
+            switch timeout {
+            case .timedOut:
+                _ = MSALAuthService.cancelPendingAuth()
+                office365LastError = "Sync timed out after \(Int(Self.office365SyncTimeoutSeconds))s."
+                office365SyncStatus = "Sync timed out — try again"
+            case .foldersMissing:
+                office365NeedsSetup = true
+                office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
+                office365SyncStatus = "Sync failed — folders missing"
+            }
         } catch {
             guard generation == office365SyncGeneration else { return }
+            if Self.isCancelLike(error) {
+                office365SyncStatus = "Sync cancelled"
+                return
+            }
             let detail = error.localizedDescription
             office365LastError = detail
             let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
@@ -1074,9 +1171,15 @@ final class DemoMailStore: MailStore {
                 || lower.contains("client id")
                 || lower.contains("no account")
                 || lower.contains("interaction_required")
-                || lower.contains("expired") {
+                || lower.contains("expired")
+                || lower.contains("folders missing") {
                 office365NeedsSetup = true
-                office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code. \(short)"
+                if lower.contains("folders missing") {
+                    office365SyncStatus = "Sync failed — folders missing"
+                    office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
+                } else {
+                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code. \(short)"
+                }
             }
         }
     }
@@ -1088,19 +1191,23 @@ final class DemoMailStore: MailStore {
         guard let account = account(for: message.accountID), account.isLiveOffice365 else { return }
         guard let remoteID = message.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else { return }
         if message.body.count > max(message.snippet.count + 40, 200) { return }
+        let generation = office365SyncGeneration
         do {
             let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
                 try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
             }
+            guard generation == office365SyncGeneration else { return }
             let loaded = try await MicrosoftGraphMailService.fetchMessageBody(accessToken: token, graphMessageID: remoteID)
+            guard generation == office365SyncGeneration else { return }
             guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
             messages[i].body = loaded.body
             messages[i].isHTML = loaded.isHTML
         } catch {
-            NSLog("Office365 body fetch failed: \(error.localizedDescription)")
+            if !Self.isCancelLike(error) {
+                NSLog("Office365 body fetch failed: \(error.localizedDescription)")
+            }
         }
     }
-
 
     private func sendOffice365Compose(_ draft: ComposeDraft) async {
         guard let account = account(for: draft.accountID), account.isLiveOffice365 else {
@@ -1175,20 +1282,34 @@ final class DemoMailStore: MailStore {
 
     private enum Office365SyncTimeoutError: LocalizedError {
         case timedOut(seconds: Int)
+        case foldersMissing
         var errorDescription: String? {
             switch self {
             case .timedOut(let seconds):
-                return "Microsoft 365 sync timed out after \(seconds)s. Use Cancel sync if buttons stay disabled, then try Sync now again."
+                return "Sync timed out after \(seconds)s — try again"
+            case .foldersMissing:
+                return "Microsoft 365 folders missing"
             }
         }
     }
 
+    private static func isCancelLike(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let url = error as? URLError, url.code == .cancelled { return true }
+        if let auth = error as? MSALAuthError, case .cancelled = auth { return true }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return true }
+        return false
+    }
+
+    /// Race operation against a hard deadline. Timeout wins even if MSAL/Graph never returns;
+    /// Cancel cooperatively cancels the group. Never tears down URLSession.
     private func withOffice365SyncTimeout<T: Sendable>(
         seconds: TimeInterval,
-        operation: @escaping @Sendable () async throws -> T
+        operation: @escaping @MainActor () async throws -> T
     ) async throws -> T {
         try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
+            group.addTask { @MainActor in
                 try await operation()
             }
             group.addTask {

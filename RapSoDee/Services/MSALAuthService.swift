@@ -649,18 +649,35 @@ final class MSALAuthService {
 
     // MARK: - Bridging
 
+    /// MSAL (and cancelCurrentWebAuthSession) can invoke the completion more than once.
+    /// CheckedContinuation asserts on a second resume — that was the Cancel main-thread crash.
+    private final class OnceResume<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+        func resume(_ body: () -> Void) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !resumed else { return }
+            resumed = true
+            body()
+        }
+    }
+
     private func acquireTokenInteractive(
         application: MSALPublicClientApplication,
         parameters: MSALInteractiveTokenParameters
     ) async throws -> MSALResult {
         try await withCheckedThrowingContinuation { continuation in
+            let once = OnceResume<MSALResult>()
             application.acquireToken(with: parameters) { result, error in
-                if let error {
-                    continuation.resume(throwing: Self.mapError(error))
-                } else if let result {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: MSALAuthError.underlying("No token result"))
+                once.resume {
+                    if let error {
+                        continuation.resume(throwing: Self.mapError(error))
+                    } else if let result {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: MSALAuthError.underlying("No token result"))
+                    }
                 }
             }
         }
@@ -671,13 +688,16 @@ final class MSALAuthService {
         parameters: MSALSilentTokenParameters
     ) async throws -> MSALResult {
         try await withCheckedThrowingContinuation { continuation in
+            let once = OnceResume<MSALResult>()
             application.acquireTokenSilent(with: parameters) { result, error in
-                if let error {
-                    continuation.resume(throwing: Self.mapError(error))
-                } else if let result {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: MSALAuthError.underlying("No token result"))
+                once.resume {
+                    if let error {
+                        continuation.resume(throwing: Self.mapError(error))
+                    } else if let result {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: MSALAuthError.underlying("No token result"))
+                    }
                 }
             }
         }
