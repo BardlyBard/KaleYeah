@@ -80,6 +80,9 @@ struct ContentView: View {
                 selection = .unifiedInbox
             }
         }
+        .onChange(of: selection) { _, newSelection in
+            Task { await store.quietSyncIfNeeded(for: newSelection) }
+        }
         .task {
             // Auto-sync every 5 minutes while the window is open; skip if a sync is already running.
             while !Task.isCancelled {
@@ -103,16 +106,24 @@ struct ContentView: View {
                         Button("Settings") { showSettings = true }
                             .buttonStyle(.bordered)
                         Button("Dismiss") {
-                            store.outboundStatus = ""
-                            store.outboundIsError = false
+                            store.clearOutboundStatus()
                         }
                         .buttonStyle(.borderless)
+                    } else {
+                        Text("Tap to dismiss")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                 }
                 .padding(12)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.clearOutboundStatus()
+                }
+                .help(store.outboundIsError ? "Outbound error" : "Tap to dismiss")
             }
         }
         .overlay(alignment: .top) {

@@ -427,12 +427,14 @@ enum MicrosoftGraphMailService {
         }
         // Lightweight list only — no `body` (HTML payloads hung sync). Bodies load on open.
         let select = "id,internetMessageId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
+        // Sent Items sorts more reliably by sentDateTime; Inbox by receivedDateTime.
+        let orderby = folderPath.contains("sentitems") ? "sentDateTime desc" : "receivedDateTime desc"
         let list: GraphList = try await getJSON(
             path: folderPath,
             accessToken: accessToken,
             query: [
                 "$top": "\(listLimit)",
-                "$orderby": "receivedDateTime desc",
+                "$orderby": orderby,
                 "$select": select,
             ]
         )

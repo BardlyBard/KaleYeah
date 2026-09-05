@@ -45,6 +45,8 @@ final class DemoMailStore: MailStore {
     var outboundStatus: String = ""
     /// True when outboundStatus is an error the user must act on.
     var outboundIsError: Bool = false
+    /// Bumped so delayed auto-clear does not wipe a newer banner.
+    private var outboundStatusClearGeneration: Int = 0
 
     /// Universal toolbar sync busy (Gmail + M365).
     var isUniversalSyncing: Bool = false
@@ -338,9 +340,26 @@ final class DemoMailStore: MailStore {
         return nil
     }
 
+    func clearOutboundStatus() {
+        outboundStatusClearGeneration += 1
+        outboundStatus = ""
+        outboundIsError = false
+    }
+
     private func setOutboundStatus(_ message: String, isError: Bool) {
         outboundStatus = message
         outboundIsError = isError
+        outboundStatusClearGeneration += 1
+        let generation = outboundStatusClearGeneration
+        // Success banners auto-dismiss; errors stay until the user taps Dismiss / the banner.
+        guard !isError, !message.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard generation == outboundStatusClearGeneration else { return }
+            if !outboundIsError {
+                outboundStatus = ""
+            }
+        }
     }
 
     /// Send mail. Always updates outboundStatus / provider status. Returns true only on success.
@@ -360,19 +379,49 @@ final class DemoMailStore: MailStore {
             }
         }
         // Demo / non-live account — local Sent only.
-        insertLocalSent(draft)
+        upsertOptimisticOutbound(draft)
         let msg = "Saved to local Sent (no live account for From)"
         setOutboundStatus(msg, isError: false)
         gmailSyncStatus = msg
         return true
     }
 
-    private func insertLocalSent(_ draft: ComposeDraft) {
-        let sentFolder = folders.first { $0.kind == .sent && $0.accountID == draft.accountID }
-        let folderID = sentFolder?.id ?? folders.first { $0.kind == .sent }?.id ?? UUID()
-        let account = account(for: draft.accountID)
+    private static let optimisticRemotePrefix = "local-"
+
+    private func parseComposeAddresses(_ raw: String) -> [String] {
+        raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    private func normalizedMailboxEmail(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let start = s.firstIndex(of: "<"), let end = s.firstIndex(of: ">"), start < end {
+            s = String(s[s.index(after: start)..<end])
+        }
+        return s
+    }
+
+    private func draftIncludesSelf(_ draft: ComposeDraft, selfEmail: String) -> Bool {
+        let selfNorm = normalizedMailboxEmail(selfEmail)
+        guard !selfNorm.isEmpty else { return false }
+        let recipients = (parseComposeAddresses(draft.to) + parseComposeAddresses(draft.cc))
+            .map(normalizedMailboxEmail)
+        return recipients.contains(selfNorm)
+    }
+
+    /// Immediately show Sent (and Inbox when mailing yourself) after a successful send.
+    private func upsertOptimisticOutbound(_ draft: ComposeDraft) {
+        let live = account(for: draft.accountID)
+        ensureStandardMailFolders(
+            for: draft.accountID,
+            baseSort: live?.isLiveOffice365 == true ? -20 : (live?.isLiveGmail == true ? -10 : 0)
+        )
+        let selfEmail = (live?.email ?? draft.fromAddress)
+        let toList = parseComposeAddresses(draft.to)
+        let ccList = parseComposeAddresses(draft.cc)
+        let includesSelf = draftIncludesSelf(draft, selfEmail: selfEmail)
+
         let bodyWithSig: String
-        if let sig = account?.signature, !sig.isEmpty {
+        if let sig = live?.signature, !sig.isEmpty, !draft.body.contains(sig) {
             bodyWithSig = draft.body + "\n\n--\n" + sig
         } else {
             bodyWithSig = draft.body
@@ -386,24 +435,116 @@ final class DemoMailStore: MailStore {
                 localPath: $0.localPath
             )
         }
-        let msg = MailMessage(
-            accountID: draft.accountID,
-            folderID: folderID,
-            fromName: account?.name ?? "Me",
-            fromAddress: draft.fromAddress,
-            toAddresses: draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) },
-            ccAddresses: draft.cc.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
-            subject: draft.subject,
-            snippet: String(bodyWithSig.prefix(120)),
-            body: bodyWithSig,
-            receivedAt: .now,
-            isRead: true,
-            attachments: attachments,
-            deliveredTo: draft.fromAddress,
-            disposition: .normal,
-            isDraft: false
-        )
-        messages.insert(msg, at: 0)
+        let now = Date()
+        let token = UUID().uuidString
+        let fromAddress = draft.fromAddress.isEmpty ? (live?.email ?? "") : draft.fromAddress
+        let fromName = live?.name ?? "Me"
+        let deliveredTo = live?.email ?? fromAddress
+
+        if let sentID = folders.first(where: { $0.kind == .sent && $0.accountID == draft.accountID })?.id {
+            messages.removeAll {
+                $0.accountID == draft.accountID
+                    && $0.folderID == sentID
+                    && ($0.remoteID?.hasPrefix(Self.optimisticRemotePrefix) == true)
+                    && $0.subject == draft.subject
+                    && abs($0.receivedAt.timeIntervalSince(now)) < 120
+            }
+            messages.insert(
+                MailMessage(
+                    accountID: draft.accountID,
+                    folderID: sentID,
+                    fromName: fromName,
+                    fromAddress: fromAddress,
+                    toAddresses: toList,
+                    ccAddresses: ccList,
+                    subject: draft.subject,
+                    snippet: String(bodyWithSig.prefix(120)),
+                    body: bodyWithSig,
+                    receivedAt: now,
+                    isRead: true,
+                    attachments: attachments,
+                    deliveredTo: deliveredTo,
+                    disposition: .normal,
+                    isDraft: false,
+                    remoteID: "\(Self.optimisticRemotePrefix)outbound:\(token)",
+                    internetMessageId: "local-msgid:\(token)"
+                ),
+                at: 0
+            )
+        }
+
+        if includesSelf,
+           let inboxID = folders.first(where: { $0.kind == .inbox && $0.accountID == draft.accountID })?.id {
+            messages.removeAll {
+                $0.accountID == draft.accountID
+                    && $0.folderID == inboxID
+                    && ($0.remoteID?.hasPrefix(Self.optimisticRemotePrefix) == true)
+                    && $0.subject == draft.subject
+                    && abs($0.receivedAt.timeIntervalSince(now)) < 120
+            }
+            messages.insert(
+                MailMessage(
+                    accountID: draft.accountID,
+                    folderID: inboxID,
+                    fromName: fromName,
+                    fromAddress: fromAddress,
+                    toAddresses: toList,
+                    ccAddresses: ccList,
+                    subject: draft.subject,
+                    snippet: String(bodyWithSig.prefix(120)),
+                    body: bodyWithSig,
+                    receivedAt: now,
+                    isRead: false,
+                    attachments: attachments,
+                    deliveredTo: deliveredTo,
+                    disposition: .normal,
+                    isDraft: false,
+                    remoteID: "\(Self.optimisticRemotePrefix)inbound:\(token)",
+                    internetMessageId: "local-msgid:\(token)"
+                ),
+                at: 0
+            )
+        }
+
+        messages.sort { $0.receivedAt > $1.receivedAt }
+    }
+
+    /// Quiet background refresh after send so Sent/Inbox pick up Graph/Gmail copies.
+    private func kickQuietPostSendSync(accountID: UUID, includeInbox: Bool) {
+        guard let account = account(for: accountID) else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if account.isLiveOffice365 {
+                await syncOffice365Now()
+                if includeInbox {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await syncOffice365Now()
+                }
+            } else if account.isLiveGmail {
+                await syncGmailNow()
+                if includeInbox {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await syncGmailNow()
+                }
+            }
+        }
+    }
+
+    /// Folder switch to Sent/Inbox triggers a quiet live sync so recent mail appears.
+    func quietSyncIfNeeded(for selection: LadderSelection) async {
+        switch selection {
+        case .folder(let id):
+            guard let folder = folder(for: id), folder.kind == .sent || folder.kind == .inbox else { return }
+            guard let accountID = folder.accountID, let account = account(for: accountID) else { return }
+            if isAnyLiveSyncing { return }
+            if account.isLiveOffice365 {
+                await syncOffice365Now()
+            } else if account.isLiveGmail {
+                await syncGmailNow()
+            }
+        case .unifiedInbox, .accountInbox, .approve:
+            break
+        }
     }
 
     func saveApproveDraft(_ draft: ComposeDraft, messageID: UUID?) {
@@ -756,7 +897,7 @@ final class DemoMailStore: MailStore {
     @discardableResult
     private func sendGmailCompose(_ draft: ComposeDraft) async -> Bool {
         guard let account = account(for: draft.accountID), account.isLiveGmail else {
-            insertLocalSent(draft)
+            upsertOptimisticOutbound(draft)
             setOutboundStatus("Saved to local Sent (Gmail account missing)", isError: false)
             return true
         }
@@ -787,10 +928,11 @@ final class DemoMailStore: MailStore {
                 draft: draft,
                 signature: account.signature
             )
-            insertLocalSent(draft)
+            upsertOptimisticOutbound(draft)
             gmailSyncStatus = "Sent via Gmail SMTP → \(to.prefix(2).joined(separator: ", "))"
             gmailLastError = nil
             setOutboundStatus(gmailSyncStatus, isError: false)
+            kickQuietPostSendSync(accountID: account.id, includeInbox: draftIncludesSelf(draft, selfEmail: account.email))
             return true
         } catch {
             let detail = error.localizedDescription
@@ -1351,7 +1493,7 @@ final class DemoMailStore: MailStore {
     @discardableResult
     private func sendOffice365Compose(_ draft: ComposeDraft) async -> Bool {
         guard let account = account(for: draft.accountID), account.isLiveOffice365 else {
-            insertLocalSent(draft)
+            upsertOptimisticOutbound(draft)
             setOutboundStatus("Saved to local Sent (Microsoft 365 account missing)", isError: false)
             return true
         }
@@ -1438,10 +1580,11 @@ final class DemoMailStore: MailStore {
                     }
                 }
             }
-            insertLocalSent(draft)
+            upsertOptimisticOutbound(draft)
             office365SyncStatus = status
             office365LastError = nil
             setOutboundStatus(status, isError: false)
+            kickQuietPostSendSync(accountID: account.id, includeInbox: draftIncludesSelf(draft, selfEmail: account.email))
             return true
         } catch {
             if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
@@ -1539,28 +1682,42 @@ final class DemoMailStore: MailStore {
         previousIDs: Set<UUID>
     ) -> [MailMessage] {
         var byRemote: [String: Int] = [:]
-        var byInternet: [String: Int] = [:]
+        // Folder-scoped: Sent + Inbox self-sends share internetMessageId but are distinct.
+        var byInternetFolder: [String: Int] = [:]
         for (idx, m) in messages.enumerated() where m.accountID == accountID {
             if let r = normalizedRemoteID(m.remoteID) {
                 byRemote[r] = idx
             }
             if let i = normalizedInternetMessageId(m.internetMessageId) {
-                byInternet[i] = idx
+                byInternetFolder["\(m.folderID.uuidString)|\(i)"] = idx
             }
         }
 
         var seenRemote = Set<String>()
-        var seenInternet = Set<String>()
+        var seenInternetFolder = Set<String>()
         var newOnes: [MailMessage] = []
         for var incoming in fetched {
             let remoteKey = normalizedRemoteID(incoming.remoteID)
             let internetKey = normalizedInternetMessageId(incoming.internetMessageId)
+            let internetFolderKey = internetKey.map { "\(incoming.folderID.uuidString)|\($0)" }
 
             var matchIndex: Int?
             if let remoteKey, let idx = byRemote[remoteKey] {
                 matchIndex = idx
-            } else if let internetKey, let idx = byInternet[internetKey] {
+            } else if let internetFolderKey, let idx = byInternetFolder[internetFolderKey] {
                 matchIndex = idx
+            } else if let internetKey {
+                // Prefer replacing an optimistic placeholder in the same folder.
+                if let idx = messages.firstIndex(where: {
+                    $0.accountID == accountID
+                        && $0.folderID == incoming.folderID
+                        && ($0.remoteID?.hasPrefix(Self.optimisticRemotePrefix) == true)
+                        && $0.subject == incoming.subject
+                        && normalizedMailboxEmail($0.fromAddress) == normalizedMailboxEmail(incoming.fromAddress)
+                        && abs($0.receivedAt.timeIntervalSince(incoming.receivedAt)) < 300
+                }) {
+                    matchIndex = idx
+                }
             }
 
             if let idx = matchIndex, messages.indices.contains(idx) {
@@ -1588,9 +1745,9 @@ final class DemoMailStore: MailStore {
                     byRemote[remoteKey] = idx
                     seenRemote.insert(remoteKey)
                 }
-                if let internetKey {
-                    byInternet[internetKey] = idx
-                    seenInternet.insert(internetKey)
+                if let internetFolderKey {
+                    byInternetFolder[internetFolderKey] = idx
+                    seenInternetFolder.insert(internetFolderKey)
                 }
             } else {
                 if !previousIDs.contains(incoming.id) && !incoming.isRead {
@@ -1602,9 +1759,23 @@ final class DemoMailStore: MailStore {
                     byRemote[remoteKey] = idx
                     seenRemote.insert(remoteKey)
                 }
-                if let internetKey {
-                    byInternet[internetKey] = idx
-                    seenInternet.insert(internetKey)
+                if let internetFolderKey {
+                    byInternetFolder[internetFolderKey] = idx
+                    seenInternetFolder.insert(internetFolderKey)
+                }
+            }
+        }
+
+        // Drop optimistic placeholders superseded by a real server row in the same folder.
+        if !fetched.isEmpty {
+            messages.removeAll { m in
+                guard m.accountID == accountID else { return false }
+                guard let r = normalizedRemoteID(m.remoteID), r.hasPrefix(Self.optimisticRemotePrefix) else { return false }
+                return fetched.contains { server in
+                    server.folderID == m.folderID
+                        && server.subject == m.subject
+                        && normalizedMailboxEmail(server.fromAddress) == normalizedMailboxEmail(m.fromAddress)
+                        && abs(server.receivedAt.timeIntervalSince(m.receivedAt)) < 300
                 }
             }
         }
@@ -1621,10 +1792,13 @@ final class DemoMailStore: MailStore {
                 // Keep rows we just upserted / appended in this pass.
                 if fetchedIDs.contains(m.id) { return false }
                 if let r = normalizedRemoteID(m.remoteID) {
+                    // Keep optimistic local Sent/Inbox until a server copy replaces them.
+                    if r.hasPrefix(Self.optimisticRemotePrefix) { return false }
                     return !seenRemote.contains(r)
                 }
                 if let i = normalizedInternetMessageId(m.internetMessageId) {
-                    return !seenInternet.contains(i)
+                    let key = "\(m.folderID.uuidString)|\(i)"
+                    return !seenInternetFolder.contains(key)
                 }
                 // Legacy rows without remote keys: remove from synced folders on replace.
                 return true
@@ -1636,7 +1810,8 @@ final class DemoMailStore: MailStore {
         return newOnes
     }
 
-    /// Collapse duplicate rows that share remoteID / internetMessageId within an account.
+    /// Collapse duplicate rows that share remoteID, or internetMessageId within the same folder.
+    /// Sent + Inbox self-sends share Message-ID but must remain distinct.
     /// Keeps the copy with local flag/snooze state when present, otherwise the newest.
     func deduplicateMessagesByRemoteID(accountID: UUID? = nil) {
         var keep: [MailMessage] = []
@@ -1650,7 +1825,7 @@ final class DemoMailStore: MailStore {
             }
 
             let remoteKey = normalizedRemoteID(msg.remoteID).map { "\(msg.accountID.uuidString)|r|\($0)" }
-            let internetKey = normalizedInternetMessageId(msg.internetMessageId).map { "\(msg.accountID.uuidString)|i|\($0)" }
+            let internetKey = normalizedInternetMessageId(msg.internetMessageId).map { "\(msg.accountID.uuidString)|\(msg.folderID.uuidString)|i|\($0)" }
 
             if remoteKey == nil && internetKey == nil {
                 keep.append(msg)
@@ -1670,7 +1845,7 @@ final class DemoMailStore: MailStore {
                 if let remoteKey {
                     chosenRemote[remoteKey] = idx
                 }
-                if let ik = normalizedInternetMessageId(winner.internetMessageId).map({ "\(winner.accountID.uuidString)|i|\($0)" }) {
+                if let ik = normalizedInternetMessageId(winner.internetMessageId).map({ "\(winner.accountID.uuidString)|\(winner.folderID.uuidString)|i|\($0)" }) {
                     chosenInternet[ik] = idx
                 }
             } else {
