@@ -1021,6 +1021,10 @@ final class DemoMailStore: MailStore {
         task?.cancel()
         // Soft-cancel only — do not tear down Graph URLSession mid-callback.
         _ = MSALAuthService.cancelPendingAuth()
+        // Toolbar Sync all holds isUniversalSyncing until syncOffice365Now returns; if that
+        // await is stuck behind hung MSAL, clear universal busy here or spinner never dies.
+        syncAllInFlight = false
+        isUniversalSyncing = false
         office365IsSyncing = false
         office365SyncStartedAt = nil
         office365SyncStatus = "Sync / sign-in cancelled"
@@ -1072,7 +1076,9 @@ final class DemoMailStore: MailStore {
             let payload: SyncPayload = try await withOffice365SyncTimeout(seconds: Self.office365SyncTimeoutSeconds) {
                 try Task.checkCancellation()
                 if self.office365Account() == nil {
-                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                    let token = try await self.withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                        try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                    }
                     try Task.checkCancellation()
                     guard generation == self.office365SyncGeneration else { throw CancellationError() }
                     let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
@@ -1091,10 +1097,12 @@ final class DemoMailStore: MailStore {
                 let accountID = account.id
                 let accountEmailHint = account.email
 
-                let token = try await MSALAuthService.shared.acquireAccessToken(
-                    interactiveIfNeeded: false,
-                    loginHint: accountEmailHint
-                )
+                let token = try await self.withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                    try await MSALAuthService.shared.acquireAccessToken(
+                        interactiveIfNeeded: false,
+                        loginHint: accountEmailHint
+                    )
+                }
                 try Task.checkCancellation()
                 guard generation == self.office365SyncGeneration else { throw CancellationError() }
                 let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
@@ -1147,10 +1155,19 @@ final class DemoMailStore: MailStore {
         } catch let timeout as Office365SyncTimeoutError {
             guard generation == office365SyncGeneration else { return }
             switch timeout {
-            case .timedOut:
+            case .timedOut(let seconds):
                 _ = MSALAuthService.cancelPendingAuth()
-                office365LastError = "Sync timed out after \(Int(Self.office365SyncTimeoutSeconds))s."
-                office365SyncStatus = "Sync timed out — try again"
+                // Clear any universal toolbar busy that may still be awaiting this sync.
+                syncAllInFlight = false
+                isUniversalSyncing = false
+                if seconds <= Int(Self.office365TokenTimeoutSeconds) + 1 {
+                    office365NeedsSetup = true
+                    office365LastError = "Silent Microsoft token timed out. Use Settings → Sign in with device code."
+                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code"
+                } else {
+                    office365LastError = "Sync timed out after \(seconds)s. If this keeps happening, Sign in with device code."
+                    office365SyncStatus = "Sync timed out — try again"
+                }
             case .foldersMissing:
                 office365NeedsSetup = true
                 office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
@@ -1167,18 +1184,14 @@ final class DemoMailStore: MailStore {
             let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
             office365SyncStatus = "Sync failed — \(short)"
             let lower = detail.lowercased()
-            if lower.contains("not signed")
-                || lower.contains("client id")
-                || lower.contains("no account")
-                || lower.contains("interaction_required")
-                || lower.contains("expired")
-                || lower.contains("folders missing") {
+            if Self.isSilentAuthFailure(error) || lower.contains("folders missing") || lower.contains("client id") {
                 office365NeedsSetup = true
                 if lower.contains("folders missing") {
                     office365SyncStatus = "Sync failed — folders missing"
                     office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
                 } else {
-                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code. \(short)"
+                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code"
+                    office365LastError = "Silent token failed. Open Settings → Sign in with device code.\n\(short)"
                 }
             }
         }
@@ -1274,7 +1287,9 @@ final class DemoMailStore: MailStore {
             } else {
                 do {
                     // Silent only — never acquireTokenInteractive from Send.
-                    let token = try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
+                    let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                        try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
+                    }
                     let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
                     status = try await MicrosoftGraphMailService.sendMail(
                         accessToken: token,
@@ -1284,7 +1299,7 @@ final class DemoMailStore: MailStore {
                         signature: account.signature
                     )
                 } catch {
-                    if Self.isSilentAuthFailure(error) {
+                    if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                         failSendSignInExpired(error.localizedDescription)
                         return
                     }
@@ -1294,7 +1309,7 @@ final class DemoMailStore: MailStore {
                     do {
                         status = try await sendOffice365ViaSMTP(draft: draft, account: account)
                     } catch {
-                        if Self.isSilentAuthFailure(error) {
+                        if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                             failSendSignInExpired("Graph: \(graphDetail)\nSMTP: \(error.localizedDescription)")
                             return
                         }
@@ -1310,7 +1325,7 @@ final class DemoMailStore: MailStore {
             office365SyncStatus = status
             office365LastError = nil
         } catch {
-            if Self.isSilentAuthFailure(error) {
+            if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                 failSendSignInExpired(error.localizedDescription)
                 return
             }
@@ -1323,10 +1338,12 @@ final class DemoMailStore: MailStore {
 
     private func sendOffice365ViaSMTP(draft: ComposeDraft, account: MailAccount) async throws -> String {
         // Silent only — never open browser / interactive MSAL from Send.
-        let smtpToken = try await MSALAuthService.shared.acquireSMTPAccessToken(
-            interactiveIfNeeded: false,
-            loginHint: account.email
-        )
+        let smtpToken = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+            try await MSALAuthService.shared.acquireSMTPAccessToken(
+                interactiveIfNeeded: false,
+                loginHint: account.email
+            )
+        }
         return try await MicrosoftGraphMailService.sendViaSMTPOAuth(
             accessToken: smtpToken,
             mailboxEmail: account.email,
@@ -1357,30 +1374,32 @@ final class DemoMailStore: MailStore {
         return false
     }
 
-    /// Race operation against a hard deadline. Timeout wins even if MSAL/Graph never returns;
-    /// Cancel cooperatively cancels the group. Never tears down URLSession.
+    /// Race operation against a hard deadline. Timeout must return even if MSAL/Graph
+    /// never completes — do NOT use TaskGroup (Swift waits for cancelled children on exit,
+    /// so a hung acquireTokenSilent left the Sync spinner forever after 45s "won").
+    /// Cancel / soft-cancel MSAL without tearing down URLSession.
     private func withOffice365SyncTimeout<T: Sendable>(
         seconds: TimeInterval,
         operation: @escaping @MainActor () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { @MainActor in
-                try await operation()
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw Office365SyncTimeoutError.timedOut(seconds: Int(seconds))
-            }
-            do {
-                guard let value = try await group.next() else {
-                    group.cancelAll()
-                    throw Office365SyncTimeoutError.timedOut(seconds: Int(seconds))
+        let secondsInt = Int(seconds)
+        let gate = Office365TimeoutGate()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let work = Task { @MainActor in
+                do {
+                    let value = try await operation()
+                    gate.complete { continuation.resume(returning: value) }
+                } catch {
+                    gate.complete { continuation.resume(throwing: error) }
                 }
-                group.cancelAll()
-                return value
-            } catch {
-                group.cancelAll()
-                throw error
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                gate.complete {
+                    work.cancel()
+                    _ = MSALAuthService.cancelPendingAuth()
+                    continuation.resume(throwing: Office365SyncTimeoutError.timedOut(seconds: secondsInt))
+                }
             }
         }
     }
@@ -1598,3 +1617,17 @@ final class DemoMailStore: MailStore {
         applyPersistedDisplayNames()
     }
 }
+
+/// One-shot resume gate for Office365 hard timeouts (cannot nest types in generic closures).
+fileprivate final class Office365TimeoutGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    func complete(_ body: () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        finished = true
+        body()
+    }
+}
+

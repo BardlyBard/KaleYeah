@@ -4,14 +4,14 @@ import Foundation
 enum MicrosoftGraphMailService {
     private static let graphRoot = "https://graph.microsoft.com/v1.0"
     /// Keep list sync small — full HTML bodies were hanging Kale Yeah sync past 60s.
-    private static let listLimit = 25
+    private static let listLimit = 20
 
     /// Bounded Graph HTTP — short timeouts so Cancel / Settings never sit forever.
     /// Do NOT call invalidateAndCancel from UI cancel (can race and crash); rely on Task cancellation.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 25
-        config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 25
         config.waitsForConnectivity = false
         config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config)
