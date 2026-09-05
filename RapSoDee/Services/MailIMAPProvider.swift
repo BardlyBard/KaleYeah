@@ -97,4 +97,9 @@ struct IMAPSyncResult {
     var foldersFetched: Int
     var messagesFetched: Int
     var status: String
+    /// When true, caller may replace folder contents from the fetch window.
+    /// Incremental UID high-water sync sets this false (never prune on empty/partial).
+    var allowsFolderReplace: Bool
+    /// True when every mailbox used UID high-water (Sync with no new mail stays fast).
+    var usedIncremental: Bool
 }

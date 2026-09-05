@@ -49,7 +49,7 @@ xcodebuild -scheme RapSoDee -destination 'platform=macOS' -configuration Debug -
    - Tap **Add Gmail** / **Save Password**, then **Test connection** and **Sync now**.
 5. On later launches, if Keychain still has the password, RapSoDee syncs automatically. Demo accounts remain for UI without Gmail.
 
-IMAP: `imap.gmail.com:993` (SSL). SMTP: `smtp.gmail.com:465` (SSL). Recent messages (≈50) from Inbox / Sent / Drafts when listable. Flags / file / snooze stay local-first for the live account.
+IMAP: `imap.gmail.com:993` (SSL). SMTP: `smtp.gmail.com:465` (SSL). First Sync hydrates a recent window (≈200) from Inbox / Sent / Drafts; later Sync uses **UID high-water** (UIDVALIDITY-safe) so unchanged mailboxes return quickly. Flags / file / snooze stay local-first for the live account.
 
 ## Connect Kale Yeah Microsoft 365 (MSAL + Graph)
 
@@ -106,7 +106,7 @@ Scopes used by the app:
 ### Behaviour
 
 - **Sign in / Sign out / Sync** in Settings; signed-in account shown.
-- Graph lists recent Inbox + Sent; HTML bodies map into the existing reading pane.
+- Graph lists recent Inbox + Sent + Archive on first hydrate; later Sync uses **delta queries / deltaLink** (seeded with `$deltatoken=latest`) so unchanged mailboxes stay fast. HTML bodies lazy-load on open into the reading pane and are cached on disk.
 - **Compose send (default):** Graph `POST /me/messages` (draft) → `POST /me/messages/{id}/send`. Never sets `from` when sending as the signed-in user.
 - **Replies:** Graph `createReply` / `createReplyAll` → PATCH → send.
 - **SMTP fallback:** on Graph send failure (or Settings → **Prefer SMTP (XOAUTH2) for send**), submit via `smtp.office365.com:587` STARTTLS with SASL XOAUTH2. Status line names the path used (`draft→send`, `createReply→send`, `SMTP XOAUTH2`).
@@ -143,6 +143,17 @@ Notes:
 - Dates are preserved when Graph accepts `receivedDateTime` / `sentDateTime` on create.
 - Never commit `.eml` contents or tokens (see `.gitignore`).
 
+## Offline mail + differential Sync
+
+RapSoDee keeps a **durable on-disk mail index** under the sandboxed Application Support folder for bundle `local.rapsodee.mail` (`…/Application Support/RapSoDeeMailCache/`). After a successful hydrate, quit/relaunch shows list metadata offline without an empty flash. Full bodies may lazy-load on open (Graph) and are stored as sidecars; Sync never wipes local mail on a failed or empty fetch.
+
+| Provider | First Sync | Later Sync |
+|----------|------------|------------|
+| Microsoft 365 (Graph) | Recent window list + seed `$deltatoken=latest` | `@odata.deltaLink` change set (adds/updates/`@removed`) |
+| Gmail (IMAP) | Recent UID/sequence window + store UIDVALIDITY/high-water | `UID FETCH (last+1):*` only |
+
+**How to verify:** cold-launch RapSoDee (list should restore from disk), then Sync with no new mail — status should report delta/UID “no changes” / “no new mail” and finish quickly (token + lightweight change check, not a full re-list of ~200).
+
 ## Project layout
 
 ```
@@ -175,7 +186,7 @@ project.yml                  # XcodeGen spec
 | Sort + basic filters | Smart mailboxes beyond Inbox/Approve |
 | Shortcuts: Archive, Flag, File, Snooze, Next/Prev | Customizable keybindings |
 | Attachments: no auto-preview; PDF/image tap-preview; block exe/js/html | Safer quarantine + AV hooks |
-| SwiftData persistence for settings & flags | Message cache DB |
+| SwiftData persistence for settings & flags; durable Application Support mail index + delta/UID sync cursors | Richer SQLite/GRDB message DB |
 | VIP / Junk+Train / Smart File / notification **stubs** | Full implementations |
 
 ## Design notes

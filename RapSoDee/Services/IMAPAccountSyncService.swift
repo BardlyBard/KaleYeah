@@ -65,17 +65,43 @@ enum IMAPAccountSyncService {
         }
 
         var all: [MailMessage] = []
+        var incrementalFolders = 0
+        var hydrateFolders = 0
         for (info, folderID) in picked {
-            let fetched = try await imap.fetchRecent(mailbox: info.name, limit: provider.recentLimit)
+            let cursor = MailMessageCache.imapCursor(provider: provider.rawValue, email: email, mailbox: info.name)
+            let state = try await imap.selectState(info.name)
+            let fetched: [IMAPFetchedMessage]
+            let usedIncremental: Bool
+            if let cursor,
+               cursor.uidValidity != 0,
+               state.uidValidity != 0,
+               cursor.uidValidity == state.uidValidity {
+                // UID high-water: only pull UIDs newer than the last successful sync.
+                fetched = try await imap.fetchUIDs(afterUID: cursor.highestUID, includeBodies: true)
+                usedIncremental = true
+                incrementalFolders += 1
+            } else {
+                if cursor != nil, state.uidValidity != 0, cursor?.uidValidity != state.uidValidity {
+                    MailMessageCache.clearIMAPCursor(provider: provider.rawValue, email: email, mailbox: info.name)
+                }
+                fetched = try await imap.fetchRecent(limit: provider.recentLimit)
+                usedIncremental = false
+                hydrateFolders += 1
+            }
+
+            var maxUID: UInt32 = cursor?.highestUID ?? 0
+            if usedIncremental == false {
+                maxUID = 0
+            }
             for item in fetched {
+                maxUID = max(maxUID, item.uid)
                 let id = stableMessageID(provider: provider, email: email, mailbox: info.name, uid: item.uid)
                 var attachments: [MailAttachment] = []
                 for raw in item.rawAttachments {
-                    let attID = UUID()
                     let path = try? AttachmentStore.save(data: raw.data, filename: raw.filename, messageID: id)
                     attachments.append(
                         MailAttachment(
-                            id: attID,
+                            id: UUID(),
                             filename: raw.filename,
                             mimeType: raw.mimeType,
                             byteSize: raw.data.count,
@@ -108,13 +134,37 @@ enum IMAPAccountSyncService {
                 )
                 all.append(msg)
             }
+            // Persist high-water even when the change set is empty (fast no-op Sync).
+            let highest = max(maxUID, (state.uidNext > 0 ? state.uidNext &- 1 : 0))
+            if state.uidValidity != 0 {
+                MailMessageCache.saveIMAPCursor(
+                    provider: provider.rawValue,
+                    email: email,
+                    mailbox: info.name,
+                    uidValidity: state.uidValidity,
+                    highestUID: highest
+                )
+            }
+            _ = usedIncremental
         }
         await imap.logout()
 
+        let usedIncremental = hydrateFolders == 0 && incrementalFolders > 0
+        let allowsFolderReplace = hydrateFolders > 0 && !all.isEmpty
+        let status: String
+        if usedIncremental && all.isEmpty {
+            status = "UID sync — no new mail (\(provider.displayName))"
+        } else if usedIncremental {
+            status = "UID sync — \(all.count) new from \(incrementalFolders) folders (\(provider.displayName))"
+        } else {
+            status = "Synced \(all.count) messages from \(picked.count) folders (\(provider.displayName))"
+        }
         let result = IMAPSyncResult(
             foldersFetched: picked.count,
             messagesFetched: all.count,
-            status: "Synced \(all.count) messages from \(picked.count) folders (\(provider.displayName))"
+            status: status,
+            allowsFolderReplace: allowsFolderReplace,
+            usedIncremental: usedIncremental
         )
         return (all, listed, result)
     }

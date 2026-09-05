@@ -883,12 +883,16 @@ final class DemoMailStore: MailStore {
                 accountID: account.id,
                 folderIDs: folderIDs
             )
-            let synced = Set([folderIDs.inbox, folderIDs.sent, folderIDs.drafts])
+            // Incremental UID sync must not mark folders prunable (empty change set ≠ wipe).
+            let synced: Set<UUID> = result.allowsFolderReplace
+                ? Set([folderIDs.inbox, folderIDs.sent, folderIDs.drafts])
+                : []
             let newOnes = upsertSyncedMessages(
                 accountID: account.id,
                 syncedFolderIDs: synced,
                 fetched: fetched,
-                previousIDs: previousIDs
+                previousIDs: previousIDs,
+                removedRemoteIDs: []
             )
             gmailSyncStatus = result.status
             gmailNeedsSetup = false
@@ -1546,6 +1550,7 @@ final class DemoMailStore: MailStore {
                 var messages: [MailMessage]
                 var status: String
                 var prunableFolderIDs: Set<UUID>
+                var removedRemoteIDs: [String]
                 var accountID: UUID
                 var accountEmailHint: String
                 var previousIDs: Set<UUID>
@@ -1591,7 +1596,7 @@ final class DemoMailStore: MailStore {
                 // Extra message sync targets = recently imported customs (capped inside upsert).
                 var extraTargets: [(localFolderID: UUID, graphFolderID: String)] = []
                 // List folders up-front when possible so SyncPayload can carry them; sync() also lists.
-                let (fetched, result, prunable, remoteFolders) = try await MicrosoftGraphMailService.sync(
+                let (fetched, result, prunable, remoteFolders, removedRemoteIDs) = try await MicrosoftGraphMailService.sync(
                     accessToken: token,
                     accountID: accountID,
                     folderIDs: folderIDs,
@@ -1618,6 +1623,7 @@ final class DemoMailStore: MailStore {
                     messages: fetched,
                     status: result.status,
                     prunableFolderIDs: prunable,
+                    removedRemoteIDs: removedRemoteIDs,
                     accountID: accountID,
                     accountEmailHint: accountEmailHint,
                     previousIDs: previousIDs
@@ -1633,7 +1639,8 @@ final class DemoMailStore: MailStore {
                 accountID: payload.accountID,
                 syncedFolderIDs: payload.prunableFolderIDs,
                 fetched: payload.messages,
-                previousIDs: payload.previousIDs
+                previousIDs: payload.previousIDs,
+                removedRemoteIDs: payload.removedRemoteIDs
             )
             office365SyncStatus = payload.status
             office365NeedsSetup = false
@@ -1850,6 +1857,8 @@ final class DemoMailStore: MailStore {
             guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
             messages[i].body = loaded.body
             messages[i].isHTML = loaded.isHTML
+            MailMessageCache.saveLoadedBody(messageID: messageID, text: loaded.body, isHTML: loaded.isHTML)
+            persistMessageCache()
         } catch {
             if !Self.isCancelLike(error) {
                 NSLog("Office365 body fetch failed: \(error.localizedDescription)")
@@ -2105,14 +2114,16 @@ final class DemoMailStore: MailStore {
     // MARK: - Sync upsert / dedupe
 
     /// Merge fetched live mail by `remoteID` (fallback: internetMessageId). Preserves local UUID,
-    /// named flags, and snooze. Prunes stale rows only in successfully synced folders, and never
-    /// when `fetched` is empty (keeps existing mail on empty/error responses).
+    /// named flags, snooze, and already-loaded bodies. Prunes stale rows only in successfully
+    /// *replaced* folders (hydrate), and never when `fetched` is empty. Delta removals apply via
+    /// `removedRemoteIDs` without wiping the rest of the local index.
     @discardableResult
     private func upsertSyncedMessages(
         accountID: UUID,
         syncedFolderIDs: Set<UUID>,
         fetched: [MailMessage],
-        previousIDs: Set<UUID>
+        previousIDs: Set<UUID>,
+        removedRemoteIDs: [String] = []
     ) -> [MailMessage] {
         var byRemote: [String: Int] = [:]
         // Folder-scoped: Sent + Inbox self-sends share internetMessageId but are distinct.
@@ -2133,6 +2144,26 @@ final class DemoMailStore: MailStore {
         let activeFetched = fetched.filter { msg in
             guard let r = normalizedRemoteID(msg.remoteID) else { return true }
             return !deletedRemoteIDs.contains(r)
+        }
+        // Delta / server removals — drop matching local rows without folder-wide prune.
+        let removedSet = Set(removedRemoteIDs.compactMap { normalizedRemoteID($0) })
+        if !removedSet.isEmpty {
+            messages.removeAll { m in
+                guard m.accountID == accountID else { return false }
+                guard let r = normalizedRemoteID(m.remoteID) else { return false }
+                return removedSet.contains(r)
+            }
+            // Rebuild indices after removal.
+            byRemote.removeAll(keepingCapacity: true)
+            byInternetFolder.removeAll(keepingCapacity: true)
+            for (idx, m) in messages.enumerated() where m.accountID == accountID {
+                if let r = normalizedRemoteID(m.remoteID) {
+                    byRemote[r] = idx
+                }
+                if let i = normalizedInternetMessageId(m.internetMessageId) {
+                    byInternetFolder["\(m.folderID.uuidString)|\(i)"] = idx
+                }
+            }
         }
         // Clear this account's tombstones once the server no longer returns them.
         // While they still appear, activeFetched keeps suppressing resurrection.
@@ -2195,6 +2226,15 @@ final class DemoMailStore: MailStore {
                     // User may have marked read locally before server caught up — keep read.
                     incoming.isRead = true
                 }
+                // Preserve lazy-loaded / fuller local body over list/delta preview snippets.
+                if local.body.count > incoming.body.count + 40 {
+                    incoming.body = local.body
+                    incoming.isHTML = local.isHTML
+                }
+                if local.attachments.contains(where: { $0.hasLocalContent || ($0.byteSize > 0 && $0.filename != "Attachment") }),
+                   incoming.attachments.allSatisfy({ $0.filename == "Attachment" && $0.byteSize == 0 }) {
+                    incoming.attachments = local.attachments
+                }
                 messages[idx] = incoming
                 if let remoteKey {
                     byRemote[remoteKey] = idx
@@ -2235,9 +2275,9 @@ final class DemoMailStore: MailStore {
             }
         }
 
-        // Drop stale copies only in folders that were intentionally replaced by this
-        // successful fetch. Never prune when the fetch set is empty — an empty/error
-        // response must not wipe existing Gmail or Kale Yeah mail.
+        // Drop stale copies only in folders intentionally *replaced* by a hydrate window.
+        // Delta / UID incremental passes leave syncedFolderIDs empty. Never prune when
+        // the fetch set is empty — an empty/error response must not wipe local mail.
         if !fetched.isEmpty, !syncedFolderIDs.isEmpty {
             let fetchedIDs = Set(fetched.map(\.id))
             messages.removeAll { m in

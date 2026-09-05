@@ -3,7 +3,7 @@ import Foundation
 /// Microsoft Graph mail sync / send for Microsoft 365 (modern auth).
 enum MicrosoftGraphMailService {
     private static let graphRoot = "https://graph.microsoft.com/v1.0"
-    /// Cap for lightweight list sync — matches MailMessageCache.maxCachedMessages.
+    /// Cap for initial hydrate list sync (delta sync is uncapped change-set).
     /// Full HTML bodies are NOT fetched here (bodies load on open); pagination follows @odata.nextLink.
     private static let listLimit = 200
     /// Per-request page size — keep well under listLimit so a single Graph response stays
@@ -38,6 +38,19 @@ enum MicrosoftGraphMailService {
         var messagesFetched: Int
         var status: String
         var signedInEmail: String
+        /// Remote Graph ids removed via delta `@removed` (apply locally; do not full-replace folders).
+        var removedRemoteIDs: [String]
+        /// True when every successful folder used delta incremental (no new-mail Sync should be fast).
+        var usedDeltaIncremental: Bool
+    }
+
+    /// Per-folder sync outcome — incremental delta never marks the folder as fully replaceable.
+    private struct FolderMessageSyncOutcome: Sendable {
+        var messages: [MailMessage]
+        var removedRemoteIDs: [String]
+        var allowsFolderReplace: Bool
+        var usedDelta: Bool
+        var statusHint: String
     }
 
     /// Lightweight Graph mailFolder row for ladder / import picker upsert.
@@ -76,11 +89,15 @@ enum MicrosoftGraphMailService {
         messages: [MailMessage],
         result: GraphSyncResult,
         prunableFolderIDs: Set<UUID>,
-        remoteFolders: [GraphRemoteFolder]
+        remoteFolders: [GraphRemoteFolder],
+        removedRemoteIDs: [String]
     ) {
         var all: [MailMessage] = []
         var prunable: Set<UUID> = []
+        var removed: [String] = []
         var folderErrors: [String] = []
+        var deltaFolderCount = 0
+        var successFolderCount = 0
 
         // Folder tree listing is required for the ladder / import picker even when
         // message sync stays limited to well-known + recently used targets.
@@ -91,83 +108,53 @@ enum MicrosoftGraphMailService {
             folderErrors.append("Folders: \(error.localizedDescription)")
         }
 
-        // Fetch Inbox + Sent + Archive in parallel (independent failures — one miss must not prune the other).
-        await withTaskGroup(of: (name: String, folderID: UUID, result: Result<[MailMessage], Error>).self) { group in
-            group.addTask {
-                do {
-                    let msgs = try await listFolderMessages(
-                        folderPath: "/me/mailFolders/inbox/messages",
-                        accessToken: accessToken,
-                        accountID: accountID,
-                        folderID: folderIDs.inbox,
-                        accountEmail: accountEmail,
-                        mailboxKey: "inbox",
-                        isDraft: false
-                    )
-                    return ("Inbox", folderIDs.inbox, .success(msgs))
-                } catch {
-                    return ("Inbox", folderIDs.inbox, .failure(error))
+        // Inbox + Sent + Archive in parallel (independent failures — one miss must not prune the other).
+        await withTaskGroup(of: (name: String, folderID: UUID, result: Result<FolderMessageSyncOutcome, Error>).self) { group in
+            func enqueue(name: String, folderID: UUID, folderPath: String, mailboxKey: String) {
+                group.addTask {
+                    do {
+                        let outcome = try await syncFolderMessages(
+                            folderPath: folderPath,
+                            accessToken: accessToken,
+                            accountID: accountID,
+                            folderID: folderID,
+                            accountEmail: accountEmail,
+                            mailboxKey: mailboxKey,
+                            isDraft: false
+                        )
+                        return (name, folderID, .success(outcome))
+                    } catch {
+                        return (name, folderID, .failure(error))
+                    }
                 }
             }
-            group.addTask {
-                do {
-                    let msgs = try await listFolderMessages(
-                        folderPath: "/me/mailFolders/sentitems/messages",
-                        accessToken: accessToken,
-                        accountID: accountID,
-                        folderID: folderIDs.sent,
-                        accountEmail: accountEmail,
-                        mailboxKey: "sentitems",
-                        isDraft: false
-                    )
-                    return ("Sent", folderIDs.sent, .success(msgs))
-                } catch {
-                    return ("Sent", folderIDs.sent, .failure(error))
-                }
-            }
-            group.addTask {
-                do {
-                    let msgs = try await listFolderMessages(
-                        folderPath: "/me/mailFolders/archive/messages",
-                        accessToken: accessToken,
-                        accountID: accountID,
-                        folderID: folderIDs.archive,
-                        accountEmail: accountEmail,
-                        mailboxKey: "archive",
-                        isDraft: false
-                    )
-                    return ("Archive", folderIDs.archive, .success(msgs))
-                } catch {
-                    return ("Archive", folderIDs.archive, .failure(error))
-                }
-            }
+            enqueue(name: "Inbox", folderID: folderIDs.inbox, folderPath: "/me/mailFolders/inbox/messages", mailboxKey: "inbox")
+            enqueue(name: "Sent", folderID: folderIDs.sent, folderPath: "/me/mailFolders/sentitems/messages", mailboxKey: "sentitems")
+            enqueue(name: "Archive", folderID: folderIDs.archive, folderPath: "/me/mailFolders/archive/messages", mailboxKey: "archive")
             for extra in extraMessageFolders {
                 let localID = extra.localFolderID
                 let graphID = extra.graphFolderID.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !graphID.isEmpty else { continue }
-                group.addTask {
-                    do {
-                        let enc = graphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? graphID
-                        let msgs = try await listFolderMessages(
-                            folderPath: "/me/mailFolders/\(enc)/messages",
-                            accessToken: accessToken,
-                            accountID: accountID,
-                            folderID: localID,
-                            accountEmail: accountEmail,
-                            mailboxKey: graphID,
-                            isDraft: false
-                        )
-                        return ("Custom", localID, .success(msgs))
-                    } catch {
-                        return ("Custom", localID, .failure(error))
-                    }
-                }
+                let enc = graphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? graphID
+                enqueue(
+                    name: "Custom",
+                    folderID: localID,
+                    folderPath: "/me/mailFolders/\(enc)/messages",
+                    mailboxKey: graphID
+                )
             }
             for await item in group {
                 switch item.result {
-                case .success(let msgs):
-                    all.append(contentsOf: msgs)
-                    prunable.insert(item.folderID)
+                case .success(let outcome):
+                    successFolderCount += 1
+                    all.append(contentsOf: outcome.messages)
+                    removed.append(contentsOf: outcome.removedRemoteIDs)
+                    if outcome.allowsFolderReplace {
+                        prunable.insert(item.folderID)
+                    }
+                    if outcome.usedDelta {
+                        deltaFolderCount += 1
+                    }
                 case .failure(let error):
                     folderErrors.append("\(item.name): \(error.localizedDescription)")
                 }
@@ -176,34 +163,46 @@ enum MicrosoftGraphMailService {
 
         // If every folder fetch failed AND we got no folder names either, surface the error.
         // Callers must keep existing mail (do not prune on failed fetch).
-        if prunable.isEmpty && remoteFolders.isEmpty {
+        if successFolderCount == 0 && remoteFolders.isEmpty {
             let detail = folderErrors.isEmpty ? "No folders synced" : folderErrors.joined(separator: " | ")
             throw GraphError.unexpected("Graph sync failed — \(detail)")
         }
 
-        var status = "Synced \(all.count) messages via Microsoft Graph"
+        let usedDeltaIncremental = successFolderCount > 0 && deltaFolderCount == successFolderCount
+        var status: String
+        if usedDeltaIncremental && all.isEmpty && removed.isEmpty {
+            status = "Delta sync — no changes (Microsoft Graph)"
+        } else if usedDeltaIncremental {
+            status = "Delta sync — \(all.count) changed, \(removed.count) removed via Microsoft Graph"
+        } else {
+            status = "Synced \(all.count) messages via Microsoft Graph"
+        }
         var parts: [String] = []
-        if prunable.contains(folderIDs.inbox) { parts.append("Inbox") }
-        if prunable.contains(folderIDs.sent) { parts.append("Sent") }
-        if prunable.contains(folderIDs.archive) { parts.append("Archive") }
-        let customCount = prunable.subtracting([folderIDs.inbox, folderIDs.sent, folderIDs.archive, folderIDs.drafts, folderIDs.trash]).count
-        if customCount > 0 { parts.append("\(customCount) custom") }
-        if !parts.isEmpty {
-            status += " (" + parts.joined(separator: " + ") + ")"
+        if successFolderCount > 0 {
+            if usedDeltaIncremental {
+                parts.append("delta")
+            } else if deltaFolderCount > 0 {
+                parts.append("delta+\(deltaFolderCount)/\(successFolderCount)")
+            }
         }
         if !remoteFolders.isEmpty {
-            status += " · \(remoteFolders.count) folders"
+            parts.append("\(remoteFolders.count) folders")
+        }
+        if !parts.isEmpty {
+            status += " (" + parts.joined(separator: " · ") + ")"
         }
         if !folderErrors.isEmpty {
             status += " — partial: \(folderErrors.joined(separator: " | "))"
         }
         let result = GraphSyncResult(
-            foldersFetched: max(prunable.count, remoteFolders.isEmpty ? 0 : 1),
+            foldersFetched: max(successFolderCount, remoteFolders.isEmpty ? 0 : 1),
             messagesFetched: all.count,
             status: status,
-            signedInEmail: accountEmail
+            signedInEmail: accountEmail,
+            removedRemoteIDs: removed,
+            usedDeltaIncremental: usedDeltaIncremental
         )
-        return (all, result, prunable, remoteFolders)
+        return (all, result, prunable, remoteFolders, removed)
     }
 
     // MARK: - Mail folders
@@ -1052,7 +1051,182 @@ enum MicrosoftGraphMailService {
 
     // MARK: - Internals
 
-    private static func listFolderMessages(
+    /// Differential folder sync: Graph delta when a token exists; otherwise hydrate a recent
+    /// window then seed `$deltatoken=latest` so the next Sync is incremental.
+    private static func syncFolderMessages(
+        folderPath: String,
+        accessToken: String,
+        accountID: UUID,
+        folderID: UUID,
+        accountEmail: String,
+        mailboxKey: String,
+        isDraft: Bool
+    ) async throws -> FolderMessageSyncOutcome {
+        if let existing = MailMessageCache.graphDeltaLink(accountID: accountID, mailboxKey: mailboxKey),
+           let deltaURL = URL(string: existing) {
+            do {
+                let delta = try await runMessageDelta(
+                    startURL: deltaURL,
+                    accessToken: accessToken,
+                    accountID: accountID,
+                    folderID: folderID,
+                    accountEmail: accountEmail,
+                    mailboxKey: mailboxKey,
+                    isDraft: isDraft,
+                    // Incremental pages are change sets — do not soft-cap like the hydrate window.
+                    pageCap: max(listLimit * 4, 500)
+                )
+                if let link = delta.deltaLink {
+                    MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: link)
+                }
+                return FolderMessageSyncOutcome(
+                    messages: delta.messages,
+                    removedRemoteIDs: delta.removedRemoteIDs,
+                    allowsFolderReplace: false,
+                    usedDelta: true,
+                    statusHint: "delta"
+                )
+            } catch let error as GraphError where isDeltaTokenExpired(error) {
+                MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: nil)
+                // Fall through to hydrate + reseed.
+            }
+        }
+
+        // First sync / after token reset: recent window hydrate (never wipe caller on empty).
+        let hydrated = try await listFolderMessagesWindow(
+            folderPath: folderPath,
+            accessToken: accessToken,
+            accountID: accountID,
+            folderID: folderID,
+            accountEmail: accountEmail,
+            mailboxKey: mailboxKey,
+            isDraft: isDraft
+        )
+        // Seed a "latest" delta token so the next Sync only pulls changes (no full re-list).
+        if let seeded = try? await seedLatestDeltaLink(folderPath: folderPath, accessToken: accessToken) {
+            MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: seeded)
+        }
+        return FolderMessageSyncOutcome(
+            messages: hydrated,
+            removedRemoteIDs: [],
+            allowsFolderReplace: !hydrated.isEmpty,
+            usedDelta: false,
+            statusHint: "hydrate"
+        )
+    }
+
+    private static func isDeltaTokenExpired(_ error: GraphError) -> Bool {
+        switch error {
+        case .http(let code, let body):
+            if code == 410 { return true }
+            if code == 400 || code == 404 {
+                let lower = body.lowercased()
+                return lower.contains("deltatoken")
+                    || lower.contains("delta link")
+                    || lower.contains("resync")
+                    || lower.contains("syncstate")
+                    || lower.contains("token is expired")
+                    || lower.contains("tokenexpired")
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// `GET …/messages/delta?$deltatoken=latest` — empty change set + deltaLink when supported.
+    private static func seedLatestDeltaLink(folderPath: String, accessToken: String) async throws -> String {
+        let deltaPath = folderPath.hasSuffix("/messages")
+            ? folderPath + "/delta"
+            : folderPath + "/delta"
+        let url = try makeURL(path: deltaPath, query: ["$deltatoken": "latest"])
+        let page: GraphDeltaList = try await getJSON(url: url, accessToken: accessToken)
+        if let link = page.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+            return link
+        }
+        // Some tenants ignore latest and return a full stream — follow until deltaLink, discard payloads.
+        var nextURL: URL? = nil
+        if let link = page.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !link.isEmpty,
+           let parsed = URL(string: link) {
+            nextURL = parsed
+        }
+        var guardPages = 0
+        while let url = nextURL, guardPages < 40 {
+            guardPages += 1
+            try Task.checkCancellation()
+            let list: GraphDeltaList = try await getJSON(url: url, accessToken: accessToken)
+            if let link = list.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+                return link
+            }
+            if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !link.isEmpty,
+               let parsed = URL(string: link) {
+                nextURL = parsed
+            } else {
+                nextURL = nil
+            }
+        }
+        throw GraphError.unexpected("Graph delta seed returned no deltaLink")
+    }
+
+    private struct DeltaRunResult: Sendable {
+        var messages: [MailMessage]
+        var removedRemoteIDs: [String]
+        var deltaLink: String?
+    }
+
+    private static func runMessageDelta(
+        startURL: URL,
+        accessToken: String,
+        accountID: UUID,
+        folderID: UUID,
+        accountEmail: String,
+        mailboxKey: String,
+        isDraft: Bool,
+        pageCap: Int
+    ) async throws -> DeltaRunResult {
+        var nextURL: URL? = startURL
+        var out: [MailMessage] = []
+        var removed: [String] = []
+        var deltaLink: String?
+        var pages = 0
+        while let url = nextURL, pages < 80, out.count < pageCap {
+            pages += 1
+            try Task.checkCancellation()
+            let list: GraphDeltaList = try await getJSON(url: url, accessToken: accessToken)
+            for gm in list.value ?? [] {
+                guard let graphID = gm.id, !graphID.isEmpty else { continue }
+                if gm.removed != nil {
+                    removed.append(graphID)
+                    continue
+                }
+                out.append(
+                    mapListedGraphMessage(
+                        gm,
+                        accountID: accountID,
+                        folderID: folderID,
+                        accountEmail: accountEmail,
+                        isDraft: isDraft
+                    )
+                )
+            }
+            if let link = list.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+                deltaLink = link
+                nextURL = nil
+            } else if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !link.isEmpty,
+                      let parsed = URL(string: link) {
+                nextURL = parsed
+            } else {
+                nextURL = nil
+            }
+        }
+        return DeltaRunResult(messages: out, removedRemoteIDs: removed, deltaLink: deltaLink)
+    }
+
+    /// Classic recent-window list (hydrate). Soft-capped to `listLimit`.
+    private static func listFolderMessagesWindow(
         folderPath: String,
         accessToken: String,
         accountID: UUID,
@@ -1091,33 +1265,13 @@ enum MicrosoftGraphMailService {
             let list: GraphList = try await getJSON(url: url, accessToken: accessToken)
             for gm in list.value ?? [] {
                 guard let graphID = gm.id, !graphID.isEmpty else { continue }
-                let id = stableMessageID(graphID: graphID)
-                var attachments: [MailAttachment] = []
-                if gm.hasAttachments == true {
-                    // Do not call Graph /attachments during list sync — N extra round-trips
-                    // (and contentBytes) blew the Office365 timeout and left Kale Yeah empty.
-                    // Stub keeps the "Has attachments" filter working; full bodies load on open.
-                    attachments = [
-                        MailAttachment(
-                            id: UUID(),
-                            filename: "Attachment",
-                            mimeType: "application/octet-stream",
-                            byteSize: 0,
-                            localPath: nil,
-                            remoteID: nil
-                        )
-                    ]
-                }
                 out.append(
-                    mapMessage(
+                    mapListedGraphMessage(
                         gm,
                         accountID: accountID,
                         folderID: folderID,
                         accountEmail: accountEmail,
-                        isDraft: isDraft,
-                        messageID: id,
-                        remoteID: graphID,
-                        attachments: attachments
+                        isDraft: isDraft
                     )
                 )
                 if out.count >= listLimit { break }
@@ -1134,6 +1288,41 @@ enum MicrosoftGraphMailService {
             }
         }
         return out
+    }
+
+    private static func mapListedGraphMessage(
+        _ gm: GraphMessage,
+        accountID: UUID,
+        folderID: UUID,
+        accountEmail: String,
+        isDraft: Bool
+    ) -> MailMessage {
+        let graphID = gm.id ?? ""
+        let id = stableMessageID(graphID: graphID)
+        var attachments: [MailAttachment] = []
+        if gm.hasAttachments == true {
+            // Stub keeps the "Has attachments" filter working; bytes load on open / demand.
+            attachments = [
+                MailAttachment(
+                    id: UUID(),
+                    filename: "Attachment",
+                    mimeType: "application/octet-stream",
+                    byteSize: 0,
+                    localPath: nil,
+                    remoteID: nil
+                )
+            ]
+        }
+        return mapMessage(
+            gm,
+            accountID: accountID,
+            folderID: folderID,
+            accountEmail: accountEmail,
+            isDraft: isDraft,
+            messageID: id,
+            remoteID: graphID,
+            attachments: attachments
+        )
     }
 
     private static func fetchFileAttachments(
@@ -1489,6 +1678,22 @@ private struct GraphFolderDTO: Decodable {
     var totalItemCount: Int?
 }
 
+private struct GraphDeltaList: Decodable {
+    var value: [GraphMessage]?
+    var nextLink: String?
+    var deltaLink: String?
+
+    enum CodingKeys: String, CodingKey {
+        case value
+        case nextLink = "@odata.nextLink"
+        case deltaLink = "@odata.deltaLink"
+    }
+}
+
+private struct GraphRemovedInfo: Decodable {
+    var reason: String?
+}
+
 private struct GraphMessage: Decodable {
     var id: String?
     var internetMessageId: String?
@@ -1503,6 +1708,13 @@ private struct GraphMessage: Decodable {
     var isRead: Bool?
     var flag: GraphFlag?
     var hasAttachments: Bool?
+    var removed: GraphRemovedInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case id, internetMessageId, subject, bodyPreview, body, from, toRecipients, ccRecipients
+        case receivedDateTime, sentDateTime, isRead, flag, hasAttachments
+        case removed = "@removed"
+    }
 }
 
 private struct GraphAttachment: Decodable {

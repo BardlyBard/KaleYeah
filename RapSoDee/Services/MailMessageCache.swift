@@ -1,15 +1,19 @@
 import Foundation
 
-/// Disk cache for live mail so quit/relaunch shows the last sync without an empty flash.
-/// Secrets stay in Keychain / MSAL — this file holds message metadata + bodies only.
+/// Durable on-disk mail index under Application Support (sandbox `local.rapsodee.mail`).
+/// Secrets stay in Keychain / MSAL — this tree holds message metadata, optional bodies, and sync cursors.
 enum MailMessageCache {
     private static let folderName = "RapSoDeeMailCache"
     private static let messagesFile = "messages.json"
     private static let tombstonesFile = "deletedRemoteIDs.json"
-    /// Soft cap so huge inboxes never block launch.
-    static let maxCachedMessages = 200
-    private static let maxBodyChars = 120_000
-    private static let loadBudgetBytes = 12 * 1024 * 1024
+    private static let syncStateFile = "syncState.json"
+    private static let bodiesFolder = "bodies"
+
+    /// Soft cap for the durable list index (metadata). Far above the old ~200 sync window.
+    static let maxCachedMessages = 10_000
+    /// Bodies in the index stay bounded; full HTML may live in sidecars after open.
+    private static let maxBodyCharsInIndex = 80_000
+    private static let loadBudgetBytes = 48 * 1024 * 1024
 
     private static var rootDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -27,36 +31,114 @@ enum MailMessageCache {
         rootDirectory.appendingPathComponent(tombstonesFile)
     }
 
+    private static var syncStateURL: URL {
+        rootDirectory.appendingPathComponent(syncStateFile)
+    }
+
+    private static var bodiesDirectory: URL {
+        let dir = rootDirectory.appendingPathComponent(bodiesFolder, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     struct Snapshot: Codable {
         var savedAt: Date
         var messages: [MailMessage]
     }
 
-    /// Load recent messages from disk. Returns empty on miss/corruption; never throws to callers.
+    /// Graph delta links + IMAP UID high-water so Sync mostly pulls changes.
+    struct SyncState: Codable, Equatable {
+        /// `accountID.uuidString|mailboxKey` → Graph `@odata.deltaLink` URL.
+        var graphDeltaLinks: [String: String]
+        /// `provider|emailLower|mailbox` → IMAP UIDVALIDITY + highest synced UID.
+        var imapFolders: [String: IMAPFolderCursor]
+
+        init(graphDeltaLinks: [String: String] = [:], imapFolders: [String: IMAPFolderCursor] = [:]) {
+            self.graphDeltaLinks = graphDeltaLinks
+            self.imapFolders = imapFolders
+        }
+
+        struct IMAPFolderCursor: Codable, Equatable {
+            var uidValidity: UInt32
+            var highestUID: UInt32
+        }
+
+        static func graphKey(accountID: UUID, mailboxKey: String) -> String {
+            "\(accountID.uuidString)|\(mailboxKey)"
+        }
+
+        static func imapKey(provider: String, email: String, mailbox: String) -> String {
+            "\(provider)|\(email.lowercased())|\(mailbox)"
+        }
+    }
+
+    // MARK: - Messages
+
+    /// Load durable message index. Returns empty on miss/corruption; never throws to callers.
     static func loadMessages() -> [MailMessage] {
         let url = messagesURL
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber,
               size.intValue <= loadBudgetBytes else {
-            // Oversized cache — leave it; next save will rewrite a bounded window.
             return []
         }
         guard let data = try? Data(contentsOf: url) else { return [] }
         guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return [] }
-        return Array(snapshot.messages.prefix(maxCachedMessages))
+        var messages = snapshot.messages
+        // Rehydrate full bodies from sidecars when present (list metadata always in index).
+        for i in messages.indices {
+            if let body = loadBodySidecar(messageID: messages[i].id), !body.text.isEmpty {
+                if body.text.count > messages[i].body.count {
+                    messages[i].body = body.text
+                    messages[i].isHTML = body.isHTML
+                }
+            }
+        }
+        return messages
     }
 
-    /// Persist a recent window after a successful sync / local delete.
+    /// Persist durable index after a successful sync / local delete / body load.
+    /// Never clears an existing non-empty index when given an empty array (failed/empty fetch safety).
     static func saveMessages(_ messages: [MailMessage]) {
+        if messages.isEmpty {
+            // Do not wipe a populated on-disk index with an empty in-memory snapshot.
+            if FileManager.default.fileExists(atPath: messagesURL.path),
+               !loadMessages().isEmpty {
+                return
+            }
+        }
         var trimmed = messages.sorted { $0.receivedAt > $1.receivedAt }
         if trimmed.count > maxCachedMessages {
             trimmed = Array(trimmed.prefix(maxCachedMessages))
         }
-        trimmed = trimmed.map { truncateBodyIfNeeded($0) }
-        let snapshot = Snapshot(savedAt: Date(), messages: trimmed)
+        // Keep metadata on disk; large bodies go to sidecars so relaunch list stays light.
+        let indexRows: [MailMessage] = trimmed.map { message in
+            if message.body.count > maxBodyCharsInIndex {
+                saveBodySidecar(messageID: message.id, text: message.body, isHTML: message.isHTML)
+                var copy = message
+                // Keep snippet-sized preview in the index row.
+                let preview = message.snippet.isEmpty
+                    ? String(message.body.prefix(400))
+                    : message.snippet
+                copy.body = preview
+                return copy
+            }
+            // Persist modest bodies in the index AND mirror to sidecar when HTML-ish / long.
+            if message.body.count > max(message.snippet.count + 80, 400) {
+                saveBodySidecar(messageID: message.id, text: message.body, isHTML: message.isHTML)
+            }
+            return message
+        }
+        let snapshot = Snapshot(savedAt: Date(), messages: indexRows)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: messagesURL, options: .atomic)
+    }
+
+    /// Persist a single message body after lazy load (open in reading pane).
+    static func saveLoadedBody(messageID: UUID, text: String, isHTML: Bool) {
+        guard !text.isEmpty else { return }
+        saveBodySidecar(messageID: messageID, text: text, isHTML: isHTML)
     }
 
     static func loadDeletedRemoteIDs() -> Set<String> {
@@ -73,10 +155,76 @@ enum MailMessageCache {
         try? data.write(to: tombstonesURL, options: .atomic)
     }
 
-    private static func truncateBodyIfNeeded(_ message: MailMessage) -> MailMessage {
-        guard message.body.count > maxBodyChars else { return message }
-        var copy = message
-        copy.body = String(message.body.prefix(maxBodyChars)) + "\n\n[…cached body truncated…]"
-        return copy
+    // MARK: - Sync state (delta / UID high-water)
+
+    static func loadSyncState() -> SyncState {
+        guard let data = try? Data(contentsOf: syncStateURL),
+              let state = try? JSONDecoder().decode(SyncState.self, from: data) else {
+            return SyncState()
+        }
+        return state
+    }
+
+    static func saveSyncState(_ state: SyncState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        try? data.write(to: syncStateURL, options: .atomic)
+    }
+
+    static func updateGraphDeltaLink(accountID: UUID, mailboxKey: String, deltaLink: String?) {
+        var state = loadSyncState()
+        let key = SyncState.graphKey(accountID: accountID, mailboxKey: mailboxKey)
+        if let deltaLink, !deltaLink.isEmpty {
+            state.graphDeltaLinks[key] = deltaLink
+        } else {
+            state.graphDeltaLinks.removeValue(forKey: key)
+        }
+        saveSyncState(state)
+    }
+
+    static func graphDeltaLink(accountID: UUID, mailboxKey: String) -> String? {
+        let key = SyncState.graphKey(accountID: accountID, mailboxKey: mailboxKey)
+        return loadSyncState().graphDeltaLinks[key]
+    }
+
+    static func imapCursor(provider: String, email: String, mailbox: String) -> SyncState.IMAPFolderCursor? {
+        let key = SyncState.imapKey(provider: provider, email: email, mailbox: mailbox)
+        return loadSyncState().imapFolders[key]
+    }
+
+    static func saveIMAPCursor(provider: String, email: String, mailbox: String, uidValidity: UInt32, highestUID: UInt32) {
+        var state = loadSyncState()
+        let key = SyncState.imapKey(provider: provider, email: email, mailbox: mailbox)
+        state.imapFolders[key] = SyncState.IMAPFolderCursor(uidValidity: uidValidity, highestUID: highestUID)
+        saveSyncState(state)
+    }
+
+    static func clearIMAPCursor(provider: String, email: String, mailbox: String) {
+        var state = loadSyncState()
+        let key = SyncState.imapKey(provider: provider, email: email, mailbox: mailbox)
+        state.imapFolders.removeValue(forKey: key)
+        saveSyncState(state)
+    }
+
+    // MARK: - Body sidecars
+
+    private struct BodySidecar: Codable {
+        var text: String
+        var isHTML: Bool
+    }
+
+    private static func bodyURL(messageID: UUID) -> URL {
+        bodiesDirectory.appendingPathComponent("\(messageID.uuidString).json")
+    }
+
+    private static func saveBodySidecar(messageID: UUID, text: String, isHTML: Bool) {
+        let payload = BodySidecar(text: text, isHTML: isHTML)
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        try? data.write(to: bodyURL(messageID: messageID), options: .atomic)
+    }
+
+    private static func loadBodySidecar(messageID: UUID) -> BodySidecar? {
+        let url = bodyURL(messageID: messageID)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(BodySidecar.self, from: data)
     }
 }

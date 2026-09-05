@@ -40,6 +40,8 @@ actor SimpleIMAPClient {
     private var conn: MailTLSConnection?
     private var tagCounter = 0
     private var lastExists = 0
+    private var lastUIDValidity: UInt32 = 0
+    private var lastUIDNext: UInt32 = 0
 
     func connect(host: String = "imap.gmail.com", port: UInt16 = 993) async throws {
         let c = MailTLSConnection(host: host, port: port)
@@ -66,23 +68,48 @@ actor SimpleIMAPClient {
         return folders
     }
 
+    struct SelectState: Sendable {
+        var exists: Int
+        var uidValidity: UInt32
+        var uidNext: UInt32
+    }
+
     @discardableResult
     func select(_ mailbox: String) async throws -> Int {
+        try await selectState(mailbox).exists
+    }
+
+    @discardableResult
+    func selectState(_ mailbox: String) async throws -> SelectState {
         let lines = try await taggedLines("SELECT \(quote(mailbox))")
         var exists = 0
+        var uidValidity: UInt32 = 0
+        var uidNext: UInt32 = 0
         for line in lines {
             let upper = line.uppercased()
             if line.hasPrefix("* "), upper.contains(" EXISTS") {
                 let parts = line.split(separator: " ")
                 if parts.count >= 2, let n = Int(parts[1]) { exists = n }
             }
+            if let v = firstMatch(line, pattern: #"UIDVALIDITY\s+(\d+)"#).flatMap(UInt32.init) {
+                uidValidity = v
+            }
+            if let v = firstMatch(line, pattern: #"UIDNEXT\s+(\d+)"#).flatMap(UInt32.init) {
+                uidNext = v
+            }
         }
         guard lines.last?.contains("OK") == true else {
             throw MailNetError.unexpected(lines.last ?? "SELECT failed")
         }
         lastExists = exists
-        return exists
+        lastUIDValidity = uidValidity
+        lastUIDNext = uidNext
+        return SelectState(exists: exists, uidValidity: uidValidity, uidNext: uidNext)
     }
+
+    func currentUIDValidity() -> UInt32 { lastUIDValidity }
+    func currentUIDNext() -> UInt32 { lastUIDNext }
+
 
     /// Fetch the most recent `limit` messages from an already-selected mailbox (by sequence).
     func fetchRecent(limit: Int) async throws -> [IMAPFetchedMessage] {
@@ -102,6 +129,36 @@ actor SimpleIMAPClient {
         _ = try await select(mailbox)
         return try await fetchRecent(limit: limit)
     }
+
+    /// Incremental UID fetch: messages with UID > `afterUID` (exclusive). Empty when caught up.
+    func fetchUIDs(afterUID: UInt32, includeBodies: Bool = true) async throws -> [IMAPFetchedMessage] {
+        if lastExists == 0 { return [] }
+        let start = afterUID &+ 1
+        if start == 0 {
+            // Overflow — fall back to recent window caller.
+            return try await fetchRecent(limit: 50)
+        }
+        // When UIDNEXT is known and start >= uidNext, there is nothing new.
+        if lastUIDNext > 0, start >= lastUIDNext {
+            return []
+        }
+        let set = "\(start):*"
+        let bodyPart = includeBodies
+            ? "BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT]"
+            : "BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID CONTENT-TYPE CONTENT-TRANSFER-ENCODING)]"
+        let lines = try await taggedLines(
+            "UID FETCH \(set) (UID FLAGS BODYSTRUCTURE \(bodyPart))",
+            allowLiterals: true
+        )
+        return parseFetch(lines)
+    }
+
+    func fetchUIDs(mailbox: String, afterUID: UInt32, includeBodies: Bool = true) async throws -> (state: SelectState, messages: [IMAPFetchedMessage]) {
+        let state = try await selectState(mailbox)
+        let messages = try await fetchUIDs(afterUID: afterUID, includeBodies: includeBodies)
+        return (state, messages)
+    }
+
 
     func logout() async {
         _ = try? await tagged("LOGOUT")
