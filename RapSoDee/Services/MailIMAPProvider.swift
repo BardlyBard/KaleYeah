@@ -85,7 +85,7 @@ enum ProviderAccountDefaults {
     static let recentLimit = 50
 }
 
-struct IMAPFolderIDs {
+struct IMAPFolderIDs: Sendable {
     var inbox: UUID
     var sent: UUID
     var drafts: UUID

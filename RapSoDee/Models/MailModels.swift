@@ -64,7 +64,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
     }
 }
 
-enum FolderKind: String, Codable, Hashable, CaseIterable {
+enum FolderKind: String, Codable, Hashable, CaseIterable, Sendable {
     case inbox, sent, drafts, archive, trash, snoozed, approve, junk, custom
 }
 
@@ -96,7 +96,7 @@ struct MailFolder: Identifiable, Hashable, Codable {
     }
 }
 
-struct MailAttachment: Identifiable, Hashable, Codable {
+struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
     var id: UUID
     var filename: String
     var mimeType: String
@@ -186,11 +186,11 @@ struct MailFlag: Identifiable, Hashable, Codable {
     ]
 }
 
-enum MessageDisposition: String, Codable, Hashable {
+enum MessageDisposition: String, Codable, Hashable, Sendable {
     case normal, pendingApproval, approved, rejected
 }
 
-struct MailMessage: Identifiable, Hashable, Codable {
+struct MailMessage: Identifiable, Hashable, Codable, Sendable {
     var id: UUID
     var accountID: UUID
     var folderID: UUID
@@ -298,7 +298,7 @@ struct MailMessage: Identifiable, Hashable, Codable {
     }
 }
 
-enum MessageSort: String, CaseIterable, Identifiable, Codable {
+enum MessageSort: String, CaseIterable, Identifiable, Codable, Sendable {
     case dateNewest, dateOldest, sender, subject
     var id: String { rawValue }
     var label: String {
@@ -311,7 +311,7 @@ enum MessageSort: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-enum MessageFilter: String, CaseIterable, Identifiable, Codable {
+enum MessageFilter: String, CaseIterable, Identifiable, Codable, Sendable {
     case all, unread, flagged, hasAttachments
     var id: String { rawValue }
     var label: String {

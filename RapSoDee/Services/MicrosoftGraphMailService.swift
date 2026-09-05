@@ -3,14 +3,17 @@ import Foundation
 /// Microsoft Graph mail sync / send for Microsoft 365 (modern auth).
 enum MicrosoftGraphMailService {
     private static let graphRoot = "https://graph.microsoft.com/v1.0"
-    private static let recentLimit = Office365Defaults.recentLimit
+    /// Keep list sync small — full HTML bodies were hanging Kale Yeah sync past 60s.
+    private static let listLimit = 25
 
-    /// Bounded Graph HTTP — avoids indefinite hangs that leave Settings buttons grayed out.
+    /// Bounded Graph HTTP — short timeouts so Cancel / Settings never sit forever.
+    /// Do NOT call invalidateAndCancel from UI cancel (can race and crash); rely on Task cancellation.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForResource = 30
         config.waitsForConnectivity = false
+        config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config)
     }()
 
@@ -106,6 +109,26 @@ enum MicrosoftGraphMailService {
             signedInEmail: accountEmail
         )
         return (all, result, prunable)
+    }
+
+
+    /// Fetch full body for one message (reading pane). Safe to call after lightweight list sync.
+    static func fetchMessageBody(accessToken: String, graphMessageID: String) async throws -> (body: String, isHTML: Bool) {
+        struct GraphBodyOnly: Decodable {
+            var body: GraphBody?
+        }
+        let encoded = graphMessageID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? graphMessageID
+        let detail: GraphBodyOnly = try await getJSON(
+            path: "/me/messages/\(encoded)",
+            accessToken: accessToken,
+            query: ["$select": "id,body"]
+        )
+        let contentType = (detail.body?.contentType ?? "text").lowercased()
+        let content = detail.body?.content ?? ""
+        guard !content.isEmpty else {
+            throw GraphError.unexpected("Graph returned an empty message body")
+        }
+        return (content, contentType == "html")
     }
 
     // MARK: - Send
@@ -402,12 +425,13 @@ enum MicrosoftGraphMailService {
         struct GraphList: Decodable {
             var value: [GraphMessage]?
         }
-        let select = "id,internetMessageId,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
+        // Lightweight list only — no `body` (HTML payloads hung sync). Bodies load on open.
+        let select = "id,internetMessageId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
         let list: GraphList = try await getJSON(
             path: folderPath,
             accessToken: accessToken,
             query: [
-                "$top": "\(recentLimit)",
+                "$top": "\(listLimit)",
                 "$orderby": "receivedDateTime desc",
                 "$select": select,
             ]
@@ -421,7 +445,7 @@ enum MicrosoftGraphMailService {
             if gm.hasAttachments == true {
                 // Do not call Graph /attachments during list sync — N extra round-trips
                 // (and contentBytes) blew the Office365 timeout and left Kale Yeah empty.
-                // Stub keeps the "Has attachments" filter working; bodies still sync.
+                // Stub keeps the "Has attachments" filter working; full bodies load on open.
                 attachments = [
                     MailAttachment(
                         id: UUID(),
@@ -512,9 +536,11 @@ enum MicrosoftGraphMailService {
         let cc = (gm.ccRecipients ?? []).compactMap { $0.emailAddress?.address }
         let subject = gm.subject ?? "(no subject)"
         let snippet = gm.bodyPreview ?? ""
+        // List sync omits `body`; preview is enough for the message list. Full body fetched on open.
         let contentType = (gm.body?.contentType ?? "text").lowercased()
-        let isHTML = contentType == "html"
-        let body = gm.body?.content ?? snippet
+        let hasFullBody = !(gm.body?.content ?? "").isEmpty
+        let isHTML = hasFullBody && contentType == "html"
+        let body = hasFullBody ? (gm.body?.content ?? snippet) : snippet
         let date = gm.receivedDateTime.flatMap(parseGraphDate)
             ?? gm.sentDateTime.flatMap(parseGraphDate)
             ?? Date()
@@ -582,7 +608,7 @@ enum MicrosoftGraphMailService {
 
     private static func getJSON<T: Decodable>(path: String, accessToken: String, query: [String: String] = [:]) async throws -> T {
         let url = try makeURL(path: path, query: query)
-        var request = URLRequest(url: url, timeoutInterval: 30)
+        var request = URLRequest(url: url, timeoutInterval: 25)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

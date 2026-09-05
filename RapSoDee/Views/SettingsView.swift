@@ -163,12 +163,14 @@ struct SettingsView: View {
                     if !store.office365SyncStatus.isEmpty {
                         Text(store.office365SyncStatus)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(store.office365LastError == nil ? Color.secondary : Color.orange)
+                            .textSelection(.enabled)
                     }
                     if let err = store.office365LastError, !err.isEmpty {
                         Text(err)
                             .font(.caption)
                             .foregroundStyle(.red)
+                            .textSelection(.enabled)
                     }
 
                     Toggle("Prefer SMTP (XOAUTH2) for send", isOn: $preferSMTPSend)

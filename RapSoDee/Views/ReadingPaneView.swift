@@ -67,6 +67,11 @@ struct ReadingPaneView: View {
         .background(MuseTheme.paneChrome(scheme: colorScheme))
         .onAppear {
             store.markRead(message.id, read: true)
+            Task { await store.ensureOffice365BodyLoaded(messageID: message.id) }
+        }
+        .onChange(of: message.id) { _, newID in
+            store.markRead(newID, read: true)
+            Task { await store.ensureOffice365BodyLoaded(messageID: newID) }
         }
         .sheet(item: $previewAttachment) { attachment in
             AttachmentPreviewSheet(attachment: attachment)

@@ -1,6 +1,7 @@
 import Foundation
 
 /// Abstraction for future IMAP / Exchange / Microsoft Graph backends.
+@MainActor
 protocol MailStore: AnyObject {
     var accounts: [MailAccount] { get }
     var folders: [MailFolder] { get }
