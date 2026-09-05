@@ -44,6 +44,26 @@ enum MailMessageCache {
     struct Snapshot: Codable {
         var savedAt: Date
         var messages: [MailMessage]
+        /// Account folders with stable UUIDs — required so relaunch can show cached mail
+        /// immediately (message.folderID must match live ladder IDs).
+        var folders: [MailFolder]
+
+        enum CodingKeys: String, CodingKey {
+            case savedAt, messages, folders
+        }
+
+        init(savedAt: Date, messages: [MailMessage], folders: [MailFolder] = []) {
+            self.savedAt = savedAt
+            self.messages = messages
+            self.folders = folders
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            savedAt = try c.decode(Date.self, forKey: .savedAt)
+            messages = try c.decode([MailMessage].self, forKey: .messages)
+            folders = try c.decodeIfPresent([MailFolder].self, forKey: .folders) ?? []
+        }
     }
 
     /// Graph delta links + IMAP UID high-water so Sync mostly pulls changes.
@@ -74,33 +94,48 @@ enum MailMessageCache {
 
     // MARK: - Messages
 
-    /// Load durable message index. Returns empty on miss/corruption; never throws to callers.
-    static func loadMessages() -> [MailMessage] {
+    /// Load durable snapshot (messages + account folders). Empty on miss/corruption.
+    static func loadSnapshot() -> Snapshot {
         let url = messagesURL
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return Snapshot(savedAt: .distantPast, messages: [], folders: [])
+        }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber,
               size.intValue <= loadBudgetBytes else {
-            return []
+            return Snapshot(savedAt: .distantPast, messages: [], folders: [])
         }
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return [] }
-        var messages = snapshot.messages
+        guard let data = try? Data(contentsOf: url) else {
+            return Snapshot(savedAt: .distantPast, messages: [], folders: [])
+        }
+        guard var snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else {
+            return Snapshot(savedAt: .distantPast, messages: [], folders: [])
+        }
         // Rehydrate full bodies from sidecars when present (list metadata always in index).
-        for i in messages.indices {
-            if let body = loadBodySidecar(messageID: messages[i].id), !body.text.isEmpty {
-                if body.text.count > messages[i].body.count {
-                    messages[i].body = body.text
-                    messages[i].isHTML = body.isHTML
+        for i in snapshot.messages.indices {
+            if let body = loadBodySidecar(messageID: snapshot.messages[i].id), !body.text.isEmpty {
+                if body.text.count > snapshot.messages[i].body.count {
+                    snapshot.messages[i].body = body.text
+                    snapshot.messages[i].isHTML = body.isHTML
                 }
             }
         }
-        return messages
+        return snapshot
+    }
+
+    /// Load durable message index. Returns empty on miss/corruption; never throws to callers.
+    static func loadMessages() -> [MailMessage] {
+        loadSnapshot().messages
+    }
+
+    /// Account folders last persisted with the message index (stable UUIDs across relaunch).
+    static func loadFolders() -> [MailFolder] {
+        loadSnapshot().folders
     }
 
     /// Persist durable index after a successful sync / local delete / body load.
     /// Never clears an existing non-empty index when given an empty array (failed/empty fetch safety).
-    static func saveMessages(_ messages: [MailMessage]) {
+    static func saveMessages(_ messages: [MailMessage], folders: [MailFolder] = []) {
         if messages.isEmpty {
             // Do not wipe a populated on-disk index with an empty in-memory snapshot.
             if FileManager.default.fileExists(atPath: messagesURL.path),
@@ -130,7 +165,15 @@ enum MailMessageCache {
             }
             return message
         }
-        let snapshot = Snapshot(savedAt: Date(), messages: indexRows)
+        // Prefer caller folders; if omitted, keep previously saved folder UUIDs so relaunch
+        // rebind keeps working even when an older call site only passes messages.
+        let foldersToSave: [MailFolder]
+        if !folders.isEmpty {
+            foldersToSave = folders.filter { $0.accountID != nil }
+        } else {
+            foldersToSave = loadFolders().filter { $0.accountID != nil }
+        }
+        let snapshot = Snapshot(savedAt: Date(), messages: indexRows, folders: foldersToSave)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: messagesURL, options: .atomic)
     }

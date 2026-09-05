@@ -2125,10 +2125,15 @@ final class DemoMailStore: MailStore {
         previousIDs: Set<UUID>,
         removedRemoteIDs: [String] = []
     ) -> [MailMessage] {
+        // Apply on a local copy and publish ONCE — intermediate removeAll/append under
+        // @Observable was flashing the mailbox empty then refilling during Sync.
+        var working = messages
+        let beforeCount = working.count
+
         var byRemote: [String: Int] = [:]
         // Folder-scoped: Sent + Inbox self-sends share internetMessageId but are distinct.
         var byInternetFolder: [String: Int] = [:]
-        for (idx, m) in messages.enumerated() where m.accountID == accountID {
+        for (idx, m) in working.enumerated() where m.accountID == accountID {
             if let r = normalizedRemoteID(m.remoteID) {
                 byRemote[r] = idx
             }
@@ -2148,7 +2153,7 @@ final class DemoMailStore: MailStore {
         // Delta / server removals — drop matching local rows without folder-wide prune.
         let removedSet = Set(removedRemoteIDs.compactMap { normalizedRemoteID($0) })
         if !removedSet.isEmpty {
-            messages.removeAll { m in
+            working.removeAll { m in
                 guard m.accountID == accountID else { return false }
                 guard let r = normalizedRemoteID(m.remoteID) else { return false }
                 return removedSet.contains(r)
@@ -2156,7 +2161,7 @@ final class DemoMailStore: MailStore {
             // Rebuild indices after removal.
             byRemote.removeAll(keepingCapacity: true)
             byInternetFolder.removeAll(keepingCapacity: true)
-            for (idx, m) in messages.enumerated() where m.accountID == accountID {
+            for (idx, m) in working.enumerated() where m.accountID == accountID {
                 if let r = normalizedRemoteID(m.remoteID) {
                     byRemote[r] = idx
                 }
@@ -2170,7 +2175,7 @@ final class DemoMailStore: MailStore {
         // After clear, an undelete on the server can bring the message back on a later sync.
         if !fetched.isEmpty {
             let fetchedRemotes = Set(fetched.compactMap { normalizedRemoteID($0.remoteID) })
-            let localRemotes = Set(messages.compactMap { m -> String? in
+            let localRemotes = Set(working.compactMap { m -> String? in
                 guard m.accountID == accountID else { return nil }
                 return normalizedRemoteID(m.remoteID)
             })
@@ -2194,7 +2199,7 @@ final class DemoMailStore: MailStore {
                 matchIndex = idx
             } else if let internetKey {
                 // Prefer replacing an optimistic placeholder in the same folder.
-                if let idx = messages.firstIndex(where: {
+                if let idx = working.firstIndex(where: {
                     $0.accountID == accountID
                         && $0.folderID == incoming.folderID
                         && ($0.remoteID?.hasPrefix(Self.optimisticRemotePrefix) == true)
@@ -2205,9 +2210,10 @@ final class DemoMailStore: MailStore {
                     matchIndex = idx
                 }
             }
+            _ = internetKey
 
-            if let idx = matchIndex, messages.indices.contains(idx) {
-                let local = messages[idx]
+            if let idx = matchIndex, working.indices.contains(idx) {
+                let local = working[idx]
                 incoming.id = local.id
                 // Keep local named-flag / snooze state.
                 if local.isFlagged {
@@ -2235,7 +2241,7 @@ final class DemoMailStore: MailStore {
                    incoming.attachments.allSatisfy({ $0.filename == "Attachment" && $0.byteSize == 0 }) {
                     incoming.attachments = local.attachments
                 }
-                messages[idx] = incoming
+                working[idx] = incoming
                 if let remoteKey {
                     byRemote[remoteKey] = idx
                     seenRemote.insert(remoteKey)
@@ -2248,8 +2254,8 @@ final class DemoMailStore: MailStore {
                 if !previousIDs.contains(incoming.id) && !incoming.isRead {
                     newOnes.append(incoming)
                 }
-                messages.append(incoming)
-                let idx = messages.count - 1
+                working.append(incoming)
+                let idx = working.count - 1
                 if let remoteKey {
                     byRemote[remoteKey] = idx
                     seenRemote.insert(remoteKey)
@@ -2263,7 +2269,7 @@ final class DemoMailStore: MailStore {
 
         // Drop optimistic placeholders superseded by a real server row in the same folder.
         if !fetched.isEmpty {
-            messages.removeAll { m in
+            working.removeAll { m in
                 guard m.accountID == accountID else { return false }
                 guard let r = normalizedRemoteID(m.remoteID), r.hasPrefix(Self.optimisticRemotePrefix) else { return false }
                 return fetched.contains { server in
@@ -2278,30 +2284,50 @@ final class DemoMailStore: MailStore {
         // Drop stale copies only in folders intentionally *replaced* by a hydrate window.
         // Delta / UID incremental passes leave syncedFolderIDs empty. Never prune when
         // the fetch set is empty — an empty/error response must not wipe local mail.
+        // Also never prune when local already had mail in those folders and this pass
+        // would shrink the visible set to empty (merge-only safety).
         if !fetched.isEmpty, !syncedFolderIDs.isEmpty {
-            let fetchedIDs = Set(fetched.map(\.id))
-            messages.removeAll { m in
-                guard m.accountID == accountID else { return false }
-                guard syncedFolderIDs.contains(m.folderID) else { return false }
-                guard m.snoozeUntil == nil else { return false }
-                // Keep rows we just upserted / appended in this pass.
-                if fetchedIDs.contains(m.id) { return false }
-                if let r = normalizedRemoteID(m.remoteID) {
-                    // Keep optimistic local Sent/Inbox until a server copy replaces them.
-                    if r.hasPrefix(Self.optimisticRemotePrefix) { return false }
-                    return !seenRemote.contains(r)
+            let localInSyncedBefore = beforeCount > 0 && messages.contains {
+                $0.accountID == accountID && syncedFolderIDs.contains($0.folderID)
+            }
+            // If we already showed mail for these folders, hydrate must MERGE not replace.
+            if !localInSyncedBefore {
+                let fetchedIDs = Set(fetched.map(\.id))
+                working.removeAll { m in
+                    guard m.accountID == accountID else { return false }
+                    guard syncedFolderIDs.contains(m.folderID) else { return false }
+                    guard m.snoozeUntil == nil else { return false }
+                    // Keep rows we just upserted / appended in this pass.
+                    if fetchedIDs.contains(m.id) { return false }
+                    if let r = normalizedRemoteID(m.remoteID) {
+                        // Keep optimistic local Sent/Inbox until a server copy replaces them.
+                        if r.hasPrefix(Self.optimisticRemotePrefix) { return false }
+                        return !seenRemote.contains(r)
+                    }
+                    if let i = normalizedInternetMessageId(m.internetMessageId) {
+                        let key = "\(m.folderID.uuidString)|\(i)"
+                        return !seenInternetFolder.contains(key)
+                    }
+                    // Legacy rows without remote keys: remove from synced folders on replace.
+                    return true
                 }
-                if let i = normalizedInternetMessageId(m.internetMessageId) {
-                    let key = "\(m.folderID.uuidString)|\(i)"
-                    return !seenInternetFolder.contains(key)
-                }
-                // Legacy rows without remote keys: remove from synced folders on replace.
-                return true
             }
         }
 
-        deduplicateMessagesByRemoteID(accountID: accountID)
-        messages.sort { $0.receivedAt > $1.receivedAt }
+        // In-place dedupe on the working copy, then single publish.
+        working = deduplicatedMessages(working, accountID: accountID)
+        working.sort { $0.receivedAt > $1.receivedAt }
+
+        #if DEBUG
+        let liveFolderIDs = Set(folders.map(\.id))
+        let visibleAfter = working.filter { liveFolderIDs.contains($0.folderID) }.count
+        let visibleBefore = messages.filter { liveFolderIDs.contains($0.folderID) }.count
+        if visibleBefore > 0 && visibleAfter == 0 && !fetched.isEmpty {
+            assertionFailure("Sync apply must not wipe visible mail when fetch succeeded")
+        }
+        #endif
+
+        messages = working
         return newOnes
     }
 
@@ -2309,11 +2335,19 @@ final class DemoMailStore: MailStore {
     /// Sent + Inbox self-sends share Message-ID but must remain distinct.
     /// Keeps the copy with local flag/snooze state when present, otherwise the newest.
     func deduplicateMessagesByRemoteID(accountID: UUID? = nil) {
+        let keep = deduplicatedMessages(messages, accountID: accountID)
+        if keep.count != messages.count {
+            messages = keep
+        }
+    }
+
+    /// Pure dedupe used by Sync apply so the mailbox can be updated in one @Observable publish.
+    private func deduplicatedMessages(_ input: [MailMessage], accountID: UUID? = nil) -> [MailMessage] {
         var keep: [MailMessage] = []
         var chosenRemote: [String: Int] = [:]
         var chosenInternet: [String: Int] = [:]
 
-        for msg in messages {
+        for msg in input {
             if let accountID, msg.accountID != accountID {
                 keep.append(msg)
                 continue
@@ -2354,10 +2388,7 @@ final class DemoMailStore: MailStore {
                 }
             }
         }
-
-        if keep.count != messages.count {
-            messages = keep
-        }
+        return keep
     }
 
     private func preferredDuplicate(_ a: MailMessage, _ b: MailMessage) -> MailMessage {
@@ -2393,26 +2424,109 @@ final class DemoMailStore: MailStore {
 
     private func loadMessageCacheFromDisk() {
         deletedRemoteIDs = MailMessageCache.loadDeletedRemoteIDs()
-        let cached = MailMessageCache.loadMessages()
-        guard !cached.isEmpty else { return }
-        // Prefer cache over empty launch; account shells already restored so folder IDs match.
+        let snapshot = MailMessageCache.loadSnapshot()
+        // Restore stable folder UUIDs BEFORE installing messages so Unified Inbox / folder
+        // filters resolve immediately (ephemeral shell folders would orphan every row).
+        restoreCachedAccountFolders(snapshot.folders)
         let knownAccountIDs = Set(accounts.map(\.id))
-        let usable = cached.filter { knownAccountIDs.contains($0.accountID) }
+        var usable = snapshot.messages.filter { knownAccountIDs.contains($0.accountID) }
         guard !usable.isEmpty else { return }
+        let hadCachedFolders = snapshot.folders.contains { $0.accountID != nil }
+        usable = rebindOrphanedMessageFolders(usable)
         if messages.isEmpty {
             messages = usable
         } else {
-            // Merge cache under existing in-memory rows (should be empty at init).
             let existing = Set(messages.map(\.id))
             messages.append(contentsOf: usable.filter { !existing.contains($0.id) })
+            messages = rebindOrphanedMessageFolders(messages)
+        }
+        // Migrate older caches that lacked folders[] so the next relaunch keeps stable UUIDs.
+        if !hadCachedFolders {
+            persistMessageCache()
         }
         #if DEBUG
-        print("RapSoDee: restored \(usable.count) cached messages")
+        let liveFolderIDs = Set(folders.map(\.id))
+        let visible = messages.filter { liveFolderIDs.contains($0.folderID) }.count
+        print("RapSoDee: restored \(usable.count) cached messages (\(visible) bound to live folders, \(snapshot.folders.count) cached folders)")
+        assert(visible > 0 || usable.isEmpty, "Cached mail must bind to live folder UUIDs on launch")
         #endif
+    }
+    /// Replace ephemeral standard folders with cached UUIDs; keep customs by remoteID/id.
+    private func restoreCachedAccountFolders(_ cached: [MailFolder]) {
+        let knownAccountIDs = Set(accounts.map(\.id))
+        let cachedAccountFolders = cached.filter { folder in
+            guard let aid = folder.accountID else { return false }
+            return knownAccountIDs.contains(aid)
+        }
+        guard !cachedAccountFolders.isEmpty else { return }
+
+        for cachedFolder in cachedAccountFolders {
+            guard let accountID = cachedFolder.accountID else { continue }
+            if cachedFolder.kind != .custom {
+                // Drop the ephemeral shell row of the same kind so the cached UUID wins.
+                folders.removeAll { $0.accountID == accountID && $0.kind == cachedFolder.kind }
+                folders.append(cachedFolder)
+                continue
+            }
+            if folders.contains(where: { $0.id == cachedFolder.id }) {
+                continue
+            }
+            if let rid = cachedFolder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rid.isEmpty,
+               folders.contains(where: { $0.accountID == accountID && $0.remoteID == rid }) {
+                continue
+            }
+            folders.append(cachedFolder)
+        }
+    }
+
+    /// Map message.folderID onto live ladder UUIDs when an older cache lacked folders[].
+    private func rebindOrphanedMessageFolders(_ input: [MailMessage]) -> [MailMessage] {
+        let liveIDs = Set(folders.map(\.id))
+        let orphanCachedIDs = Set(input.map(\.folderID).filter { !liveIDs.contains($0) })
+        guard !orphanCachedIDs.isEmpty else { return input }
+
+        var remap: [UUID: UUID] = [:]
+        for account in accounts {
+            let accountMsgs = input.filter { $0.accountID == account.id }
+            let orphans = Set(accountMsgs.map(\.folderID).filter { orphanCachedIDs.contains($0) })
+            guard !orphans.isEmpty else { continue }
+            guard let inbox = folders.first(where: { $0.accountID == account.id && $0.kind == .inbox })?.id,
+                  let sent = folders.first(where: { $0.accountID == account.id && $0.kind == .sent })?.id,
+                  let drafts = folders.first(where: { $0.accountID == account.id && $0.kind == .drafts })?.id
+            else { continue }
+
+            let accountEmail = normalizedMailboxEmail(account.email)
+            for orphanID in orphans {
+                let group = accountMsgs.filter { $0.folderID == orphanID }
+                let draftN = group.filter(\.isDraft).count
+                let sentN = group.filter {
+                    !$0.isDraft && normalizedMailboxEmail($0.fromAddress) == accountEmail
+                }.count
+                let total = max(group.count, 1)
+                if draftN * 2 >= total {
+                    remap[orphanID] = drafts
+                } else if sentN * 2 >= total {
+                    remap[orphanID] = sent
+                } else {
+                    // Default Inbox — Sync corrects Sent/Archive via remoteID upsert.
+                    remap[orphanID] = inbox
+                }
+            }
+        }
+
+        guard !remap.isEmpty else { return input }
+        return input.map { msg in
+            guard let dest = remap[msg.folderID] else { return msg }
+            var copy = msg
+            copy.folderID = dest
+            return copy
+        }
     }
 
     private func persistMessageCache() {
-        MailMessageCache.saveMessages(messages)
+        let accountFolders = folders.filter { $0.accountID != nil }
+        MailMessageCache.saveMessages(messages, folders: accountFolders)
         MailMessageCache.saveDeletedRemoteIDs(deletedRemoteIDs)
     }
 

@@ -150,7 +150,8 @@ enum IMAPAccountSyncService {
         await imap.logout()
 
         let usedIncremental = hydrateFolders == 0 && incrementalFolders > 0
-        let allowsFolderReplace = hydrateFolders > 0 && !all.isEmpty
+        // Hydrate merges into the durable local index — never folder-replace/prune.
+        let allowsFolderReplace = false
         let status: String
         if usedIncremental && all.isEmpty {
             status = "UID sync — no new mail (\(provider.displayName))"

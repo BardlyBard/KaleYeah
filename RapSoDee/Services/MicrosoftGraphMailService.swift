@@ -1106,10 +1106,13 @@ enum MicrosoftGraphMailService {
         if let seeded = try? await seedLatestDeltaLink(folderPath: folderPath, accessToken: accessToken) {
             MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: seeded)
         }
+        // Hydrate is merge-only: never mark the folder prunable. A 200-window replace
+        // was wiping the durable local index (and flashing the UI empty) on every Sync
+        // when delta tokens were missing. Removals come from delta `@removed` only.
         return FolderMessageSyncOutcome(
             messages: hydrated,
             removedRemoteIDs: [],
-            allowsFolderReplace: !hydrated.isEmpty,
+            allowsFolderReplace: false,
             usedDelta: false,
             statusHint: "hydrate"
         )
