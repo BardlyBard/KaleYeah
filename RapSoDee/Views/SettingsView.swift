@@ -177,7 +177,7 @@ struct SettingsView: View {
                         .onChange(of: preferSMTPSend) { _, value in
                             MSALAppConfig.preferSMTPSend = value
                         }
-                    Text("Default: Graph create-draft → send (closer to Outlook). On Graph failure, RapSoDee auto-falls back to SMTP. Enable this to always use smtp.office365.com:587 with XOAUTH2 (requires Entra SMTP.Send). NDRs like 550 5.7.708 are not visible in-app.")
+                    Text("Default: Graph create-draft → send (closer to Outlook). On Graph failure, RapSoDee auto-falls back to SMTP. Prefer SMTP tries XOAUTH2 first; if silent SMTP.Send token fails, it falls back to Graph so send is never a silent no-op. NDRs like 550 5.7.708 are not visible in-app.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

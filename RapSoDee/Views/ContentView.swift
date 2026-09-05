@@ -89,6 +89,33 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
+            if !store.outboundStatus.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: store.outboundIsError ? "exclamationmark.triangle.fill" : "paperplane.fill")
+                        .foregroundStyle(store.outboundIsError ? Color.orange : MuseTheme.leaf)
+                    Text(store.outboundStatus)
+                        .font(.caption.weight(store.outboundIsError ? .semibold : .regular))
+                        .foregroundStyle(store.outboundIsError ? Color.primary : Color.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                    Spacer(minLength: 8)
+                    if store.outboundIsError {
+                        Button("Settings") { showSettings = true }
+                            .buttonStyle(.bordered)
+                        Button("Dismiss") {
+                            store.outboundStatus = ""
+                            store.outboundIsError = false
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+        }
+        .overlay(alignment: .top) {
             if store.gmailNeedsSetup && !dismissGmailPrompt {
                 HStack(spacing: 12) {
                     Image(systemName: "envelope.badge")

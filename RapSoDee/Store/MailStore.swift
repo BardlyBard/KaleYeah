@@ -38,7 +38,8 @@ protocol MailStore: AnyObject {
     func updateFlagColor(id: UUID, colorHex: String)
     func deleteFlag(_ id: UUID)
 
-    func sendCompose(_ draft: ComposeDraft)
+    /// Returns true if the message was accepted for delivery (local Sent updated).
+    func sendCompose(_ draft: ComposeDraft) async -> Bool
     func saveApproveDraft(_ draft: ComposeDraft, messageID: UUID?)
     func approveAndSend(_ messageID: UUID)
     func rejectApprove(_ messageID: UUID)

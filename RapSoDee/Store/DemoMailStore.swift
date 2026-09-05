@@ -41,6 +41,11 @@ final class DemoMailStore: MailStore {
     /// Cooperative cancel target for Graph/MSAL work (do not invalidate URLSession).
     private var office365InFlightTask: Task<Void, Never>?
 
+    /// Last compose/send status shown in compose + toolbar (never silent).
+    var outboundStatus: String = ""
+    /// True when outboundStatus is an error the user must act on.
+    var outboundIsError: Bool = false
+
     /// Universal toolbar sync busy (Gmail + M365).
     var isUniversalSyncing: Bool = false
     /// Prevent overlapping Sync all / auto-sync runs.
@@ -317,16 +322,49 @@ final class DemoMailStore: MailStore {
         MuseNewMailSound.play()
     }
 
-    func sendCompose(_ draft: ComposeDraft) {
-        if let account = account(for: draft.accountID), account.isLiveGmail {
-            Task { @MainActor in await sendGmailCompose(draft) }
-            return
+    /// Resolve the live account for this draft — prefer accountID, then From address.
+    private func liveAccountForCompose(_ draft: ComposeDraft) -> MailAccount? {
+        if let account = account(for: draft.accountID), account.isLiveGmail || account.isLiveOffice365 {
+            return account
         }
-        if let account = account(for: draft.accountID), account.isLiveOffice365 {
-            Task { @MainActor in await sendOffice365Compose(draft) }
-            return
+        let from = draft.fromAddress.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !from.isEmpty {
+            if let byFrom = accounts.first(where: {
+                $0.email.lowercased() == from && ($0.isLiveGmail || $0.isLiveOffice365)
+            }) {
+                return byFrom
+            }
         }
+        return nil
+    }
+
+    private func setOutboundStatus(_ message: String, isError: Bool) {
+        outboundStatus = message
+        outboundIsError = isError
+    }
+
+    /// Send mail. Always updates outboundStatus / provider status. Returns true only on success.
+    @discardableResult
+    func sendCompose(_ draft: ComposeDraft) async -> Bool {
+        var draft = draft
+        if let live = liveAccountForCompose(draft) {
+            draft.accountID = live.id
+            if draft.fromAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                draft.fromAddress = live.email
+            }
+            if live.isLiveGmail {
+                return await sendGmailCompose(draft)
+            }
+            if live.isLiveOffice365 {
+                return await sendOffice365Compose(draft)
+            }
+        }
+        // Demo / non-live account — local Sent only.
         insertLocalSent(draft)
+        let msg = "Saved to local Sent (no live account for From)"
+        setOutboundStatus(msg, isError: false)
+        gmailSyncStatus = msg
+        return true
     }
 
     private func insertLocalSent(_ draft: ComposeDraft) {
@@ -412,7 +450,9 @@ final class DemoMailStore: MailStore {
             accountID: messages[i].accountID
         )
         messages.remove(at: i)
-        sendCompose(draft)
+        Task { @MainActor in
+            _ = await sendCompose(draft)
+        }
     }
 
     func rejectApprove(_ messageID: UUID) {
@@ -713,18 +753,33 @@ final class DemoMailStore: MailStore {
         return IMAPFolderIDs(inbox: inbox, sent: sent, drafts: drafts, archive: archive, trash: trash)
     }
 
-    private func sendGmailCompose(_ draft: ComposeDraft) async {
+    @discardableResult
+    private func sendGmailCompose(_ draft: ComposeDraft) async -> Bool {
         guard let account = account(for: draft.accountID), account.isLiveGmail else {
             insertLocalSent(draft)
-            return
+            setOutboundStatus("Saved to local Sent (Gmail account missing)", isError: false)
+            return true
+        }
+        let to = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !to.isEmpty else {
+            let msg = "Send failed — add at least one To recipient"
+            gmailLastError = msg
+            gmailSyncStatus = msg
+            setOutboundStatus(msg, isError: true)
+            return false
         }
         guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
-            gmailLastError = "Missing App Password — open Settings → Accounts"
+            let msg = "Send failed — missing Gmail App Password (Settings → Accounts)"
+            gmailLastError = msg
             gmailNeedsSetup = true
-            return
+            gmailSyncStatus = msg
+            setOutboundStatus(msg, isError: true)
+            return false
         }
         gmailIsSyncing = true
-        gmailSyncStatus = "Sending…"
+        gmailSyncStatus = "Sending via Gmail SMTP as \(account.email)…"
+        setOutboundStatus(gmailSyncStatus, isError: false)
+        defer { gmailIsSyncing = false }
         do {
             try await GmailSyncService.send(
                 email: account.email,
@@ -733,13 +788,18 @@ final class DemoMailStore: MailStore {
                 signature: account.signature
             )
             insertLocalSent(draft)
-            gmailSyncStatus = "Sent via Gmail SMTP"
+            gmailSyncStatus = "Sent via Gmail SMTP → \(to.prefix(2).joined(separator: ", "))"
             gmailLastError = nil
+            setOutboundStatus(gmailSyncStatus, isError: false)
+            return true
         } catch {
-            gmailLastError = error.localizedDescription
-            gmailSyncStatus = "Send failed"
+            let detail = error.localizedDescription
+            gmailLastError = detail
+            let short = detail.count > 200 ? String(detail.prefix(197)) + "…" : detail
+            gmailSyncStatus = "Send failed — \(short)"
+            setOutboundStatus(gmailSyncStatus, isError: true)
+            return false
         }
-        gmailIsSyncing = false
     }
 
 
@@ -1229,6 +1289,7 @@ final class DemoMailStore: MailStore {
         office365NeedsSetup = true
         let msg = Self.signInExpiredSendMessage
         office365SyncStatus = msg
+        setOutboundStatus(msg, isError: true)
         if let detail, !detail.isEmpty {
             office365LastError = "\(msg)\n\(detail)"
         } else {
@@ -1244,37 +1305,72 @@ final class DemoMailStore: MailStore {
             case .cancelled, .noPresentingWindow:
                 return false
             case .underlying(let message):
-                let lower = message.lowercased()
-                return lower.contains("interaction_required")
-                    || lower.contains("not signed")
-                    || lower.contains("no account")
-                    || lower.contains("expired")
-                    || lower.contains("login required")
-                    || lower.contains("consent_required")
+                return Self.looksLikeSilentAuthMessage(message)
             }
         }
-        let lower = error.localizedDescription.lowercased()
-        return lower.contains("interaction_required")
-            || lower.contains("not signed")
-            || lower.contains("no account")
-            || lower.contains("client id")
-            || lower.contains("expired")
-            || lower.contains("login required")
-            || lower.contains("consent_required")
+        return Self.looksLikeSilentAuthMessage(error.localizedDescription)
     }
 
-    private func sendOffice365Compose(_ draft: ComposeDraft) async {
+    /// Tight match — do not treat arbitrary "expired" delivery text as auth failure.
+    private static func looksLikeSilentAuthMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        if lower.contains("interaction_required")
+            || lower.contains("consent_required")
+            || lower.contains("login_required")
+            || lower.contains("login required")
+            || lower.contains("not signed")
+            || lower.contains("no account")
+            || lower.contains("missing client")
+            || lower.contains("client id")
+            || lower.contains("silent token")
+        {
+            return true
+        }
+        // Token / sign-in expiry only (avoid matching unrelated "expired" strings).
+        if lower.contains("token") && lower.contains("expired") { return true }
+        if lower.contains("sign-in expired") || lower.contains("signin expired") { return true }
+        if lower.contains("session expired") || lower.contains("authentication_expired") { return true }
+        return false
+    }
+
+    private func sendOffice365ViaGraph(draft: ComposeDraft, account: MailAccount) async throws -> String {
+        // Silent only — never acquireTokenInteractive from Send.
+        let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+            try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
+        }
+        let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
+        return try await MicrosoftGraphMailService.sendMail(
+            accessToken: token,
+            draft: draft,
+            fromEmail: fromEmail,
+            mailboxEmail: account.email,
+            signature: account.signature
+        )
+    }
+
+    @discardableResult
+    private func sendOffice365Compose(_ draft: ComposeDraft) async -> Bool {
         guard let account = account(for: draft.accountID), account.isLiveOffice365 else {
             insertLocalSent(draft)
-            return
+            setOutboundStatus("Saved to local Sent (Microsoft 365 account missing)", isError: false)
+            return true
+        }
+        let toList = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !toList.isEmpty else {
+            let msg = "Send failed — add at least one To recipient"
+            office365LastError = msg
+            office365SyncStatus = msg
+            setOutboundStatus(msg, isError: true)
+            return false
         }
         office365IsSyncing = true
         office365SyncStartedAt = Date()
-        let toPreview = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(2).joined(separator: ", ")
+        let toPreview = toList.prefix(2).joined(separator: ", ")
         let preferSMTP = MSALAppConfig.preferSMTPSend
         office365SyncStatus = preferSMTP
             ? "Sending via SMTP XOAUTH2 as \(account.email) → \(toPreview)…"
             : "Sending via Graph draft→send as \(account.email) → \(toPreview)…"
+        setOutboundStatus(office365SyncStatus, isError: false)
         office365LastError = nil
         defer {
             office365IsSyncing = false
@@ -1283,56 +1379,81 @@ final class DemoMailStore: MailStore {
         do {
             let status: String
             if preferSMTP {
-                status = try await sendOffice365ViaSMTP(draft: draft, account: account)
+                // Prefer SMTP, but never silent-fail: if SMTP silent token/auth fails, try Graph.
+                do {
+                    status = try await sendOffice365ViaSMTP(draft: draft, account: account)
+                } catch {
+                    if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
+                        let smtpDetail = error.localizedDescription
+                        office365SyncStatus = "SMTP XOAUTH2 unavailable — trying Graph draft→send… (\(String(smtpDetail.prefix(100))))"
+                        setOutboundStatus(office365SyncStatus, isError: false)
+                        do {
+                            status = try await sendOffice365ViaGraph(draft: draft, account: account)
+                        } catch {
+                            if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
+                                failSendSignInExpired("SMTP: \(smtpDetail)\nGraph: \(error.localizedDescription)")
+                                return false
+                            }
+                            let graphDetail = error.localizedDescription
+                            office365LastError = "SMTP: \(smtpDetail)\nGraph: \(graphDetail)"
+                            let short = graphDetail.count > 200 ? String(graphDetail.prefix(197)) + "…" : graphDetail
+                            office365SyncStatus = "Send failed (SMTP + Graph) — \(short)"
+                            setOutboundStatus(office365SyncStatus, isError: true)
+                            return false
+                        }
+                    } else {
+                        let detail = error.localizedDescription
+                        office365LastError = detail
+                        let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
+                        office365SyncStatus = "Send failed (SMTP) — \(short)"
+                        setOutboundStatus(office365SyncStatus, isError: true)
+                        return false
+                    }
+                }
             } else {
                 do {
-                    // Silent only — never acquireTokenInteractive from Send.
-                    let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                        try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
-                    }
-                    let fromEmail = draft.fromAddress.isEmpty ? account.email : draft.fromAddress
-                    status = try await MicrosoftGraphMailService.sendMail(
-                        accessToken: token,
-                        draft: draft,
-                        fromEmail: fromEmail,
-                        mailboxEmail: account.email,
-                        signature: account.signature
-                    )
+                    status = try await sendOffice365ViaGraph(draft: draft, account: account)
                 } catch {
                     if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                         failSendSignInExpired(error.localizedDescription)
-                        return
+                        return false
                     }
-                    // Graph API failure → try SMTP OAuth (NDRs are not visible in-app). Still silent-only.
+                    // Graph API failure → try SMTP OAuth. Still silent-only for tokens.
                     let graphDetail = error.localizedDescription
                     office365SyncStatus = "Graph send failed — trying SMTP XOAUTH2… (\(String(graphDetail.prefix(120))))"
+                    setOutboundStatus(office365SyncStatus, isError: false)
                     do {
                         status = try await sendOffice365ViaSMTP(draft: draft, account: account)
                     } catch {
                         if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                             failSendSignInExpired("Graph: \(graphDetail)\nSMTP: \(error.localizedDescription)")
-                            return
+                            return false
                         }
                         let smtpDetail = error.localizedDescription
                         office365LastError = "Graph: \(graphDetail)\nSMTP: \(smtpDetail)"
                         let short = smtpDetail.count > 200 ? String(smtpDetail.prefix(197)) + "…" : smtpDetail
                         office365SyncStatus = "Send failed (Graph + SMTP) — \(short)"
-                        return
+                        setOutboundStatus(office365SyncStatus, isError: true)
+                        return false
                     }
                 }
             }
             insertLocalSent(draft)
             office365SyncStatus = status
             office365LastError = nil
+            setOutboundStatus(status, isError: false)
+            return true
         } catch {
             if error is Office365SyncTimeoutError || Self.isSilentAuthFailure(error) {
                 failSendSignInExpired(error.localizedDescription)
-                return
+                return false
             }
             let detail = error.localizedDescription
             office365LastError = detail
             let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
             office365SyncStatus = "Send failed — \(short)"
+            setOutboundStatus(office365SyncStatus, isError: true)
+            return false
         }
     }
 

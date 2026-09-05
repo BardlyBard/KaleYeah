@@ -12,6 +12,9 @@ struct ComposeView: View {
     var onClose: (() -> Void)? = nil
     var onPopOut: ((ComposeDraft) -> Void)? = nil
 
+    @State private var isSending = false
+    @State private var sendError: String?
+
     var body: some View {
         VStack(spacing: 0) {
             form
@@ -32,6 +35,23 @@ struct ComposeView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             Divider().opacity(0.4)
+            if let sendError, !sendError.isEmpty {
+                Text(sendError)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+            } else if isSending {
+                Text(store.outboundStatus.isEmpty ? "Sending…" : store.outboundStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+            }
+
             HStack(spacing: 10) {
                 Button {
                     attachFiles()
@@ -40,16 +60,19 @@ struct ComposeView: View {
                 }
                 .buttonStyle(MuseCapsuleButtonStyle())
                 .help("Attach files")
+                .disabled(isSending)
 
                 if !isPopOut, let onPopOut {
                     Button("Pop Out") {
                         onPopOut(draft)
                     }
                     .buttonStyle(MuseCapsuleButtonStyle())
+                    .disabled(isSending)
                 }
                 Spacer()
                 Button("Cancel") { close() }
                     .buttonStyle(MuseCapsuleButtonStyle())
+                    .disabled(isSending)
                 if isApproveEdit {
                     Button("Save to Approve") {
                         if case .editDraft(let message) = draft.mode {
@@ -60,21 +83,18 @@ struct ComposeView: View {
                         close()
                     }
                     .buttonStyle(MuseCapsuleButtonStyle())
-                    Button("Approve & Send") {
-                        store.sendCompose(draft)
-                        if case .editDraft(let message) = draft.mode {
-                            store.removeMessage(message.id)
-                        }
-                        close()
+                    .disabled(isSending)
+                    Button(isSending ? "Sending…" : "Approve & Send") {
+                        performSend(removeApproveDraft: true)
                     }
                     .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.approve))
+                    .disabled(isSending || store.accounts.isEmpty)
                 } else {
-                    Button("Send") {
-                        store.sendCompose(draft)
-                        close()
+                    Button(isSending ? "Sending…" : "Send") {
+                        performSend(removeApproveDraft: false)
                     }
                     .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.leaf))
-                    .disabled(store.accounts.isEmpty)
+                    .disabled(isSending || store.accounts.isEmpty)
                 }
             }
             .padding(12)
@@ -175,6 +195,32 @@ struct ComposeView: View {
                 )
             } catch {
                 // Skip unreadable files silently; no content logging.
+            }
+        }
+    }
+
+    private func performSend(removeApproveDraft: Bool) {
+        sendError = nil
+        isSending = true
+        let snapshot = draft
+        Task { @MainActor in
+            let ok = await store.sendCompose(snapshot)
+            isSending = false
+            if ok {
+                if removeApproveDraft, case .editDraft(let message) = snapshot.mode {
+                    store.removeMessage(message.id)
+                }
+                close()
+            } else {
+                let status = store.outboundStatus
+                let detail = store.office365LastError ?? store.gmailLastError
+                if !status.isEmpty {
+                    sendError = status
+                } else if let detail, !detail.isEmpty {
+                    sendError = detail
+                } else {
+                    sendError = "Send failed — see Settings for details"
+                }
             }
         }
     }

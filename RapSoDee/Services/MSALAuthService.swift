@@ -376,6 +376,8 @@ final class MSALAuthService {
     /// Silent token (Keychain cache / device-code refresh). Optionally fall back to interactive.
     func acquireAccessToken(interactiveIfNeeded: Bool = false, loginHint: String? = nil) async throws -> String {
         rebuildApplicationIfPossible()
+        // Prior Sync/Send timeout may have set this; clear so device-code refresh can run.
+        deviceCodeCancelled = false
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 
         if let application, let account = try? application.allAccounts().first {
@@ -405,6 +407,7 @@ final class MSALAuthService {
     /// Access token for SMTP AUTH XOAUTH2. Graph tokens are a different audience and will not work.
     func acquireSMTPAccessToken(interactiveIfNeeded: Bool = false, loginHint: String? = nil) async throws -> String {
         rebuildApplicationIfPossible()
+        deviceCodeCancelled = false
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 
         if let application, let account = try? application.allAccounts().first {
