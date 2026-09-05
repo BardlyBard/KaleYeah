@@ -131,6 +131,10 @@ struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
     var localPath: String?
     /// Provider-specific attachment id (e.g. Graph) for optional re-fetch.
     var remoteID: String?
+    /// MIME Content-ID (Graph contentId) for HTML cid: rewrite.
+    var contentId: String?
+    /// True when Graph/MIME marks the part as inline (embedded image), not a paperclip.
+    var isInline: Bool
 
     init(
         id: UUID = UUID(),
@@ -139,7 +143,9 @@ struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
         byteSize: Int,
         demoPayloadHint: String? = nil,
         localPath: String? = nil,
-        remoteID: String? = nil
+        remoteID: String? = nil,
+        contentId: String? = nil,
+        isInline: Bool = false
     ) {
         self.id = id
         self.filename = filename
@@ -148,10 +154,12 @@ struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
         self.demoPayloadHint = demoPayloadHint
         self.localPath = localPath
         self.remoteID = remoteID
+        self.contentId = contentId
+        self.isInline = isInline
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, filename, mimeType, byteSize, demoPayloadHint, localPath, remoteID
+        case id, filename, mimeType, byteSize, demoPayloadHint, localPath, remoteID, contentId, isInline
     }
 
     init(from decoder: Decoder) throws {
@@ -163,6 +171,8 @@ struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
         demoPayloadHint = try c.decodeIfPresent(String.self, forKey: .demoPayloadHint)
         localPath = try c.decodeIfPresent(String.self, forKey: .localPath)
         remoteID = try c.decodeIfPresent(String.self, forKey: .remoteID)
+        contentId = try c.decodeIfPresent(String.self, forKey: .contentId)
+        isInline = try c.decodeIfPresent(Bool.self, forKey: .isInline) ?? false
     }
 
     var isPreviewable: Bool {
@@ -186,6 +196,9 @@ struct MailAttachment: Identifiable, Hashable, Codable, Sendable {
         guard let localPath, !localPath.isEmpty else { return false }
         return FileManager.default.fileExists(atPath: localPath)
     }
+
+    /// Paperclip strip / list icon — hide pure inline CID images.
+    var showsInPaperclip: Bool { !isInline }
 }
 
 struct MailFlag: Identifiable, Hashable, Codable {
@@ -398,4 +411,12 @@ struct ComposeDraft: Identifiable, Hashable {
     var accountID: UUID
     var popOut: Bool = false
     var attachments: [ComposeAttachment] = []
+}
+
+
+extension MailMessage {
+    /// Non-inline attachments for paperclip UI / Has attachments filter.
+    var paperclipAttachments: [MailAttachment] {
+        attachments.filter(\.showsInPaperclip)
+    }
 }

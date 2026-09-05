@@ -1378,7 +1378,7 @@ enum MicrosoftGraphMailService {
         // Metadata-only during inbox sync — contentBytes payloads are huge and slow.
         let query: [String: String] = includeBytes
             ? [:]
-            : ["$select": "id,name,contentType,size,@odata.type"]
+            : ["$select": "id,name,contentType,size,contentId,isInline,@odata.type"]
         let list: GraphAttachmentList = try await getJSON(
             path: "/me/messages/\(encodedID)/attachments",
             accessToken: accessToken,
@@ -1387,6 +1387,8 @@ enum MicrosoftGraphMailService {
         var result: [MailAttachment] = []
         for item in list.value ?? [] {
             let typeName = (item.odataType ?? "").lowercased()
+            // Prefer fileAttachment (bytes + contentId). Skip referenceAttachment /
+            // itemAttachment (no contentBytes on list payload).
             guard typeName.contains("fileattachment") else { continue }
             let filename = (item.name ?? "attachment").trimmingCharacters(in: .whitespacesAndNewlines)
             let mime = item.contentType ?? AttachmentStore.mimeType(forFilename: filename)
@@ -1396,8 +1398,14 @@ enum MicrosoftGraphMailService {
                let b64 = item.contentBytes, !b64.isEmpty,
                let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) {
                 byteSize = data.count
-                localPath = try? AttachmentStore.save(data: data, filename: filename, messageID: mailMessageID)
+                let saveName = filename.isEmpty ? "inline.bin" : filename
+                localPath = try? AttachmentStore.save(data: data, filename: saveName, messageID: mailMessageID)
             }
+            let rawCID = item.contentId?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let contentId = (rawCID?.isEmpty == false) ? rawCID : nil
+            // Graph sets isInline for CID images; also treat contentId + image as inline.
+            let inline = item.isInline
+                ?? (contentId != nil && (mime.hasPrefix("image/") || filename.lowercased().hasPrefix("image")))
             result.append(
                 MailAttachment(
                     id: UUID(),
@@ -1405,7 +1413,9 @@ enum MicrosoftGraphMailService {
                     mimeType: mime,
                     byteSize: byteSize,
                     localPath: localPath,
-                    remoteID: item.id
+                    remoteID: item.id,
+                    contentId: contentId,
+                    isInline: inline
                 )
             )
         }
@@ -1802,10 +1812,12 @@ private struct GraphAttachment: Decodable {
     var contentType: String?
     var size: Int?
     var contentBytes: String?
+    var contentId: String?
+    var isInline: Bool?
     var odataType: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, contentType, size, contentBytes
+        case id, name, contentType, size, contentBytes, contentId, isInline
         case odataType = "@odata.type"
     }
 }

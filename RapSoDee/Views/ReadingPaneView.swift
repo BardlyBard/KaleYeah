@@ -25,11 +25,14 @@ struct ReadingPaneView: View {
                     .padding(.top, 16)
             }
             if message.isHTML {
-                HTMLMailWebView(html: message.body)
+                HTMLMailWebView(
+                    html: message.body,
+                    baseURL: AttachmentStore.directory(forMessageID: message.id)
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                if !message.attachments.isEmpty {
+                if !message.paperclipAttachments.isEmpty {
                     ScrollView {
                         attachmentsSection
                             .padding(20)
@@ -46,7 +49,7 @@ struct ReadingPaneView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        if !message.attachments.isEmpty {
+                        if !message.paperclipAttachments.isEmpty {
                             attachmentsSection
                         }
                     }
@@ -220,7 +223,7 @@ struct ReadingPaneView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Attachments")
                 .font(.headline)
-            ForEach(message.attachments) { attachment in
+            ForEach(message.paperclipAttachments) { attachment in
                 HStack {
                     Image(systemName: attachment.isBlockedType ? "hand.raised.fill" : "paperclip")
                         .foregroundStyle(attachment.isBlockedType ? .red : MuseTheme.leaf)

@@ -5,6 +5,8 @@ import WebKit
 /// Sandboxed HTML mail renderer — JavaScript off, non-persistent data store.
 struct HTMLMailWebView: NSViewRepresentable {
     let html: String
+    /// When set (typically AttachmentStore per-message dir), relative cid: rewrites resolve to local files.
+    var baseURL: URL? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -25,9 +27,11 @@ struct HTMLMailWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         let wrapped = Self.wrap(html)
-        if context.coordinator.lastHTML == wrapped { return }
+        let baseKey = baseURL?.path ?? ""
+        if context.coordinator.lastHTML == wrapped, context.coordinator.lastBasePath == baseKey { return }
         context.coordinator.lastHTML = wrapped
-        webView.loadHTMLString(wrapped, baseURL: nil)
+        context.coordinator.lastBasePath = baseKey
+        webView.loadHTMLString(wrapped, baseURL: baseURL)
     }
 
     static func wrap(_ html: String) -> String {
@@ -69,6 +73,7 @@ struct HTMLMailWebView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var lastHTML: String?
+        var lastBasePath: String = ""
 
         func webView(
             _ webView: WKWebView,

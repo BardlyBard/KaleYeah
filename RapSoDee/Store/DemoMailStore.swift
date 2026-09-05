@@ -122,7 +122,7 @@ final class DemoMailStore: MailStore {
         case .all: break
         case .unread: list = list.filter { !$0.isRead }
         case .flagged: list = list.filter { $0.isFlagged }
-        case .hasAttachments: list = list.filter { !$0.attachments.isEmpty }
+        case .hasAttachments: list = list.filter { !$0.paperclipAttachments.isEmpty }
         }
 
         switch sort {
@@ -1859,13 +1859,18 @@ final class DemoMailStore: MailStore {
 
     /// Load full Graph body + real attachments when opening a Kale Yeah message.
     /// List/delta sync only stores `bodyPreview` and attachment stubs (`filename == "Attachment"`).
+    /// Also fetches inline CID images (even when `hasAttachments` was false) and rewrites
+    /// HTML `cid:` refs to local files beside AttachmentStore / body sidecars.
     func ensureOffice365BodyLoaded(messageID: UUID) async {
         guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let message = messages[idx]
         guard let account = account(for: message.accountID), account.isLiveOffice365 else { return }
         guard let remoteID = message.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else { return }
         let needsBody = message.body.count <= max(message.snippet.count + 40, 200)
-        let needsAttachments = message.attachments.contains { !$0.hasLocalContent }
+        let hasUnresolvedCID = MailInlineCID.htmlHasUnresolvedCID(message.body)
+        let needsAttachmentBytes = message.attachments.contains { !$0.hasLocalContent }
+        // Inline-only mail often has no list stubs (`hasAttachments == false`) but still has cid: in HTML.
+        let needsAttachments = needsAttachmentBytes || hasUnresolvedCID
         guard needsBody || needsAttachments else { return }
         let generation = office365SyncGeneration
         do {
@@ -1881,7 +1886,11 @@ final class DemoMailStore: MailStore {
                 messages[i].isHTML = loaded.isHTML
                 MailMessageCache.saveLoadedBody(messageID: messageID, text: loaded.body, isHTML: loaded.isHTML)
             }
-            if needsAttachments {
+            // Re-check after body hydrate — preview may not have contained cid:.
+            let bodyNow = messages.first(where: { $0.id == messageID })?.body ?? message.body
+            let unresolvedAfterBody = MailInlineCID.htmlHasUnresolvedCID(bodyNow)
+            let stillNeedsAtts = needsAttachmentBytes || unresolvedAfterBody
+            if stillNeedsAtts {
                 let atts = try await MicrosoftGraphMailService.fetchFileAttachments(
                     messageGraphID: remoteID,
                     accessToken: token,
@@ -1895,6 +1904,17 @@ final class DemoMailStore: MailStore {
                 } else if messages[i].attachments.allSatisfy({ $0.filename == "Attachment" && !$0.hasLocalContent }) {
                     // Server reports no file attachments — clear stubs so the paperclip UI does not lie.
                     messages[i].attachments = []
+                }
+            }
+            // Rewrite cid: → local relative filenames (HTMLMailWebView uses AttachmentStore baseURL).
+            if let i = messages.firstIndex(where: { $0.id == messageID }),
+               messages[i].isHTML,
+               MailInlineCID.htmlHasUnresolvedCID(messages[i].body),
+               !messages[i].attachments.isEmpty {
+                let rewritten = MailInlineCID.rewriteHTML(messages[i].body, attachments: messages[i].attachments)
+                if rewritten != messages[i].body {
+                    messages[i].body = rewritten
+                    MailMessageCache.saveLoadedBody(messageID: messageID, text: rewritten, isHTML: true)
                 }
             }
             persistMessageCache()

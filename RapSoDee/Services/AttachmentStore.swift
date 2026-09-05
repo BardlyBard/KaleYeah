@@ -13,6 +13,13 @@ enum AttachmentStore {
         return dir
     }
 
+    /// Per-message directory used as WKWebView baseURL for relative cid: rewrites.
+    static func directory(forMessageID messageID: UUID) -> URL {
+        let dir = rootDirectory.appendingPathComponent(messageID.uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     /// Writes bytes to a unique path under Application Support. Returns absolute path.
     @discardableResult
     static func save(data: Data, filename: String, messageID: UUID) throws -> String {

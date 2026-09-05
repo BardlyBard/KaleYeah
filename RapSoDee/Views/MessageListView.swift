@@ -195,7 +195,7 @@ struct MessageRowView: View {
                             .foregroundStyle(flagColor)
                             .font(.caption)
                     }
-                    if !message.attachments.isEmpty {
+                    if !message.paperclipAttachments.isEmpty {
                         Image(systemName: "paperclip")
                             .font(.caption)
                             .foregroundStyle(.secondary)
