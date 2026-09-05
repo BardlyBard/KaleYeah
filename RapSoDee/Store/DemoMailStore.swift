@@ -36,7 +36,8 @@ final class DemoMailStore: MailStore {
     var emlImportIsRunning: Bool = false
     private var emlImportTask: Task<Void, Never>?
     /// Overall Graph sync budget (silent token + lightweight inbox/sent list).
-    private static let office365SyncTimeoutSeconds: TimeInterval = 45
+    /// Raised from 45→90 after listLimit=200: token + multi-page Inbox/Sent needs headroom.
+    private static let office365SyncTimeoutSeconds: TimeInterval = 90
     /// Silent token acquire must fail fast — never hang Settings on interactive auth during Sync.
     private static let office365TokenTimeoutSeconds: TimeInterval = 12
     /// Bumped on Cancel so in-flight sync abandons results without racing UI.
@@ -1816,7 +1817,7 @@ final class DemoMailStore: MailStore {
 
     /// Race operation against a hard deadline. Timeout must return even if MSAL/Graph
     /// never completes — do NOT use TaskGroup (Swift waits for cancelled children on exit,
-    /// so a hung acquireTokenSilent left the Sync spinner forever after 45s "won").
+    /// so a hung acquireTokenSilent left the Sync spinner forever after the deadline "won").
     /// Cancel / soft-cancel MSAL without tearing down URLSession.
     private func withOffice365SyncTimeout<T: Sendable>(
         seconds: TimeInterval,

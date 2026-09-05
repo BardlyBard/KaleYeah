@@ -6,13 +6,17 @@ enum MicrosoftGraphMailService {
     /// Cap for lightweight list sync — matches MailMessageCache.maxCachedMessages.
     /// Full HTML bodies are NOT fetched here (bodies load on open); pagination follows @odata.nextLink.
     private static let listLimit = 200
+    /// Per-request page size — keep well under listLimit so a single Graph response stays
+    /// inside URLSession timeouts; follow nextLink until listLimit. ($top=listLimit=200
+    /// routinely blew the prior 45s hard sync deadline across Inbox+Sent.)
+    private static let pageSize = 50
 
-    /// Bounded Graph HTTP — short timeouts so Cancel / Settings never sit forever.
+    /// List/sync HTTP — sized for pageSize×pages (Cancel still uses Task cancellation).
     /// Do NOT call invalidateAndCancel from UI cancel (can race and crash); rely on Task cancellation.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 25
+        config.timeoutIntervalForRequest = 45
+        config.timeoutIntervalForResource = 90
         config.waitsForConnectivity = false
         config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config)
@@ -62,37 +66,49 @@ enum MicrosoftGraphMailService {
         var prunable: Set<UUID> = []
         var folderErrors: [String] = []
 
-        // Fetch folders independently so one failure does not wipe the other via prune.
-        do {
-            let inbox = try await listFolderMessages(
-                folderPath: "/me/mailFolders/inbox/messages",
-                accessToken: accessToken,
-                accountID: accountID,
-                folderID: folderIDs.inbox,
-                accountEmail: accountEmail,
-                mailboxKey: "inbox",
-                isDraft: false
-            )
-            all.append(contentsOf: inbox)
-            prunable.insert(folderIDs.inbox)
-        } catch {
-            folderErrors.append("Inbox: \(error.localizedDescription)")
-        }
-
-        do {
-            let sent = try await listFolderMessages(
-                folderPath: "/me/mailFolders/sentitems/messages",
-                accessToken: accessToken,
-                accountID: accountID,
-                folderID: folderIDs.sent,
-                accountEmail: accountEmail,
-                mailboxKey: "sentitems",
-                isDraft: false
-            )
-            all.append(contentsOf: sent)
-            prunable.insert(folderIDs.sent)
-        } catch {
-            folderErrors.append("Sent: \(error.localizedDescription)")
+        // Fetch Inbox + Sent in parallel (independent failures — one miss must not prune the other).
+        await withTaskGroup(of: (name: String, folderID: UUID, result: Result<[MailMessage], Error>).self) { group in
+            group.addTask {
+                do {
+                    let msgs = try await listFolderMessages(
+                        folderPath: "/me/mailFolders/inbox/messages",
+                        accessToken: accessToken,
+                        accountID: accountID,
+                        folderID: folderIDs.inbox,
+                        accountEmail: accountEmail,
+                        mailboxKey: "inbox",
+                        isDraft: false
+                    )
+                    return ("Inbox", folderIDs.inbox, .success(msgs))
+                } catch {
+                    return ("Inbox", folderIDs.inbox, .failure(error))
+                }
+            }
+            group.addTask {
+                do {
+                    let msgs = try await listFolderMessages(
+                        folderPath: "/me/mailFolders/sentitems/messages",
+                        accessToken: accessToken,
+                        accountID: accountID,
+                        folderID: folderIDs.sent,
+                        accountEmail: accountEmail,
+                        mailboxKey: "sentitems",
+                        isDraft: false
+                    )
+                    return ("Sent", folderIDs.sent, .success(msgs))
+                } catch {
+                    return ("Sent", folderIDs.sent, .failure(error))
+                }
+            }
+            for await item in group {
+                switch item.result {
+                case .success(let msgs):
+                    all.append(contentsOf: msgs)
+                    prunable.insert(item.folderID)
+                case .failure(let error):
+                    folderErrors.append("\(item.name): \(error.localizedDescription)")
+                }
+            }
         }
 
         // If every folder fetch failed, surface the error and do NOT return an empty
@@ -808,7 +824,7 @@ enum MicrosoftGraphMailService {
         var nextURL: URL? = try makeURL(
             path: folderPath,
             query: [
-                "$top": "\(listLimit)",
+                "$top": "\(pageSize)",
                 "$orderby": orderby,
                 "$select": select,
             ]
@@ -1004,7 +1020,7 @@ enum MicrosoftGraphMailService {
 
     /// Absolute-URL GET (path-based queries and Graph `@odata.nextLink` pages).
     private static func getJSON<T: Decodable>(url: URL, accessToken: String) async throws -> T {
-        var request = URLRequest(url: url, timeoutInterval: 25)
+        var request = URLRequest(url: url, timeoutInterval: 60)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
