@@ -130,10 +130,12 @@ RapSoDee uses MSAL **ASWebAuthenticationSession** (`webviewType = .authenticatio
 Import `.eml` files into the signed-in Kale Yeah Microsoft 365 mailbox via Microsoft Graph so **OWA, RapSoDee, and Outlook** all see the mail. This is **not** PST import.
 
 1. Sign in to Microsoft 365 in **Settings → Accounts — Microsoft 365** (silent token; use **Sign in with device code** if expired).
-2. Choose destination: **Inbox** (default), **Archive**, or a custom Graph `mailFolder` id.
-3. Click **Import EML…** (also **File → Import EML…** / ⇧⌘I).
-4. In the open panel, select a **folder** of `.eml` files and/or individual `.eml` files (recursive).
-5. Watch progress (`N/M imported`); failures are listed; duplicates with the same `Message-ID` are skipped.
+2. Tap **Sync** so Graph folder names appear (Inbox, **Sent Items**, Archive, customs).
+3. Choose destination in Settings: **Inbox**, **Sent Items**, **Archive**, **Drafts**, synced customs, or a raw Graph folder id. Use **Sent Items** for Zoho/sent-file EMLs.
+4. Optional: **New Folder** creates a Graph folder (also from the Kale Yeah account context menu).
+5. Click **Import EML…** (also **File → Import EML…** / ⇧⌘I).
+6. In the open panel, select a **folder** of `.eml` files and/or individual `.eml` files (recursive).
+7. Watch progress (`N/M imported`); failures are listed; duplicates with the same `Message-ID` are skipped. After import, Sync refreshes.
 6. When finished, RapSoDee runs **Sync** so the message list refreshes.
 
 Notes:

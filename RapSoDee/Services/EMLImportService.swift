@@ -2,9 +2,12 @@ import Foundation
 import AppKit
 import UniformTypeIdentifiers
 
+/// Built-in destinations plus a way to pick any synced Graph folder by id.
 enum EMLImportDestination: String, CaseIterable, Identifiable, Sendable {
     case inbox
+    case sent
     case archive
+    case drafts
     case custom
 
     var id: String { rawValue }
@@ -12,7 +15,9 @@ enum EMLImportDestination: String, CaseIterable, Identifiable, Sendable {
     var title: String {
         switch self {
         case .inbox: return "Inbox"
+        case .sent: return "Sent Items"
         case .archive: return "Archive"
+        case .drafts: return "Drafts"
         case .custom: return "Custom folder ID"
         }
     }
@@ -21,10 +26,22 @@ enum EMLImportDestination: String, CaseIterable, Identifiable, Sendable {
     var wellKnownName: String? {
         switch self {
         case .inbox: return "inbox"
+        case .sent: return "sentitems"
         case .archive: return "archive"
+        case .drafts: return "drafts"
         case .custom: return nil
         }
     }
+}
+
+/// Named row for the Settings / import destination picker (well-known + synced customs).
+struct EMLImportFolderOption: Identifiable, Hashable, Sendable {
+    /// Stable picker id (well-known name or Graph folder id).
+    var id: String
+    var title: String
+    /// Value passed to Graph `mailFolders/{id}` (well-known name or real id).
+    var graphFolderID: String
+    var isCustom: Bool
 }
 
 struct EMLImportProgress: Sendable {

@@ -76,6 +76,10 @@ struct MailFolder: Identifiable, Hashable, Codable {
     var sortOrder: Int
     var isPinned: Bool
     var isSmart: Bool
+    /// Graph mailFolder id, or well-known name (`inbox`, `sentitems`, …) for API calls / import.
+    var remoteID: String?
+    /// Local parent folder when nesting customs under another ladder folder.
+    var parentFolderID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -84,7 +88,9 @@ struct MailFolder: Identifiable, Hashable, Codable {
         kind: FolderKind,
         sortOrder: Int = 0,
         isPinned: Bool = false,
-        isSmart: Bool = false
+        isSmart: Bool = false,
+        remoteID: String? = nil,
+        parentFolderID: UUID? = nil
     ) {
         self.id = id
         self.accountID = accountID
@@ -93,6 +99,25 @@ struct MailFolder: Identifiable, Hashable, Codable {
         self.sortOrder = sortOrder
         self.isPinned = isPinned
         self.isSmart = isSmart
+        self.remoteID = remoteID
+        self.parentFolderID = parentFolderID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, accountID, name, kind, sortOrder, isPinned, isSmart, remoteID, parentFolderID
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        accountID = try c.decodeIfPresent(UUID.self, forKey: .accountID)
+        name = try c.decode(String.self, forKey: .name)
+        kind = try c.decode(FolderKind.self, forKey: .kind)
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        isSmart = try c.decodeIfPresent(Bool.self, forKey: .isSmart) ?? false
+        remoteID = try c.decodeIfPresent(String.self, forKey: .remoteID)
+        parentFolderID = try c.decodeIfPresent(UUID.self, forKey: .parentFolderID)
     }
 }
 

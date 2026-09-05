@@ -22,8 +22,9 @@ struct SettingsView: View {
     @State private var msalTenantID = MSALAppConfig.tenantID
     @State private var deviceCodePrompt: MSALDeviceCodePrompt?
     @State private var preferSMTPSend = MSALAppConfig.preferSMTPSend
-    @State private var emlDestination: EMLImportDestination = .inbox
+    @State private var emlDestinationFolderID: String = "inbox"
     @State private var emlCustomFolderID = ""
+    @State private var newFolderName = ""
 
     var body: some View {
         NavigationStack {
@@ -184,26 +185,63 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
 
                     Group {
-                        Text("Import Zoho / backup .eml into this Microsoft 365 mailbox (Graph). Not for PST.")
+                        Text("Import Zoho / backup .eml into this Microsoft 365 mailbox (Graph). Not for PST. Sync first so Sent Items and custom folders appear in the picker.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Picker("Destination folder", selection: $emlDestination) {
-                            ForEach(EMLImportDestination.allCases) { dest in
-                                Text(dest.title).tag(dest)
+                        let importOptions = store.office365EMLImportOptions()
+                        Picker("Destination folder", selection: $emlDestinationFolderID) {
+                            ForEach(importOptions) { opt in
+                                Text(opt.isCustom ? opt.title : opt.title)
+                                    .tag(opt.graphFolderID)
                             }
+                            Text("Custom folder ID…").tag("__custom__")
                         }
-                        if emlDestination == .custom {
+                        if emlDestinationFolderID == "__custom__" {
                             TextField("Graph mailFolder id", text: $emlCustomFolderID)
                                 .font(.system(.body, design: .monospaced))
+                        }
+                        HStack(spacing: 8) {
+                            TextField("New folder name", text: $newFolderName)
+                            Button("New Folder") {
+                                Task {
+                                    office365Busy = true
+                                    defer { office365Busy = false }
+                                    if let created = await store.createOffice365Folder(displayName: newFolderName) {
+                                        emlDestinationFolderID = created.remoteID ?? emlDestinationFolderID
+                                        newFolderName = ""
+                                    }
+                                }
+                            }
+                            .disabled(
+                                office365Busy
+                                    || store.office365IsSyncing
+                                    || newFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || (store.office365Account() == nil && !MSALAuthService.shared.isSignedIn)
+                            )
                         }
                         HStack(spacing: 10) {
                             Button("Import EML…") {
                                 Task {
                                     office365Busy = true
                                     defer { office365Busy = false }
+                                    let options = store.office365EMLImportOptions()
+                                    let selectedID: String
+                                    let selectedTitle: String
+                                    if emlDestinationFolderID == "__custom__" {
+                                        selectedID = emlCustomFolderID
+                                        selectedTitle = "Custom"
+                                    } else if let opt = options.first(where: { $0.graphFolderID == emlDestinationFolderID }) {
+                                        selectedID = opt.graphFolderID
+                                        selectedTitle = opt.title
+                                    } else {
+                                        selectedID = emlDestinationFolderID
+                                        selectedTitle = emlDestinationFolderID
+                                    }
                                     await store.importEMLIntoMicrosoft365(
-                                        destination: emlDestination,
-                                        customFolderID: emlCustomFolderID
+                                        destination: .custom,
+                                        customFolderID: selectedID,
+                                        graphFolderID: selectedID,
+                                        destinationTitle: selectedTitle
                                     ) { prompt in
                                         deviceCodePrompt = prompt
                                         store.office365SyncStatus = "Enter code \(prompt.userCode) at \(prompt.verificationURL.host ?? "microsoft.com/devicelogin")"

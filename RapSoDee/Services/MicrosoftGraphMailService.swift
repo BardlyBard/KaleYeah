@@ -39,6 +39,15 @@ enum MicrosoftGraphMailService {
         var signedInEmail: String
     }
 
+    /// Lightweight Graph mailFolder row for ladder / import picker upsert.
+    struct GraphRemoteFolder: Sendable, Hashable {
+        var id: String
+        var displayName: String
+        var parentFolderId: String?
+        var childFolderCount: Int
+        var totalItemCount: Int
+    }
+
     // MARK: - Profile
 
     static func fetchSignedInEmail(accessToken: String) async throws -> String {
@@ -60,13 +69,28 @@ enum MicrosoftGraphMailService {
         accessToken: String,
         accountID: UUID,
         folderIDs: IMAPFolderIDs,
-        accountEmail: String
-    ) async throws -> (messages: [MailMessage], result: GraphSyncResult, prunableFolderIDs: Set<UUID>) {
+        accountEmail: String,
+        extraMessageFolders: [(localFolderID: UUID, graphFolderID: String)] = []
+    ) async throws -> (
+        messages: [MailMessage],
+        result: GraphSyncResult,
+        prunableFolderIDs: Set<UUID>,
+        remoteFolders: [GraphRemoteFolder]
+    ) {
         var all: [MailMessage] = []
         var prunable: Set<UUID> = []
         var folderErrors: [String] = []
 
-        // Fetch Inbox + Sent in parallel (independent failures — one miss must not prune the other).
+        // Folder tree listing is required for the ladder / import picker even when
+        // message sync stays limited to well-known + recently used targets.
+        var remoteFolders: [GraphRemoteFolder] = []
+        do {
+            remoteFolders = try await listMailFolderTree(accessToken: accessToken)
+        } catch {
+            folderErrors.append("Folders: \(error.localizedDescription)")
+        }
+
+        // Fetch Inbox + Sent + Archive in parallel (independent failures — one miss must not prune the other).
         await withTaskGroup(of: (name: String, folderID: UUID, result: Result<[MailMessage], Error>).self) { group in
             group.addTask {
                 do {
@@ -100,6 +124,44 @@ enum MicrosoftGraphMailService {
                     return ("Sent", folderIDs.sent, .failure(error))
                 }
             }
+            group.addTask {
+                do {
+                    let msgs = try await listFolderMessages(
+                        folderPath: "/me/mailFolders/archive/messages",
+                        accessToken: accessToken,
+                        accountID: accountID,
+                        folderID: folderIDs.archive,
+                        accountEmail: accountEmail,
+                        mailboxKey: "archive",
+                        isDraft: false
+                    )
+                    return ("Archive", folderIDs.archive, .success(msgs))
+                } catch {
+                    return ("Archive", folderIDs.archive, .failure(error))
+                }
+            }
+            for extra in extraMessageFolders {
+                let localID = extra.localFolderID
+                let graphID = extra.graphFolderID.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !graphID.isEmpty else { continue }
+                group.addTask {
+                    do {
+                        let enc = graphID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? graphID
+                        let msgs = try await listFolderMessages(
+                            folderPath: "/me/mailFolders/\(enc)/messages",
+                            accessToken: accessToken,
+                            accountID: accountID,
+                            folderID: localID,
+                            accountEmail: accountEmail,
+                            mailboxKey: graphID,
+                            isDraft: false
+                        )
+                        return ("Custom", localID, .success(msgs))
+                    } catch {
+                        return ("Custom", localID, .failure(error))
+                    }
+                }
+            }
             for await item in group {
                 switch item.result {
                 case .success(let msgs):
@@ -111,32 +173,217 @@ enum MicrosoftGraphMailService {
             }
         }
 
-        // If every folder fetch failed, surface the error and do NOT return an empty
-        // "success" — callers must keep existing mail.
-        if prunable.isEmpty {
+        // If every folder fetch failed AND we got no folder names either, surface the error.
+        // Callers must keep existing mail (do not prune on failed fetch).
+        if prunable.isEmpty && remoteFolders.isEmpty {
             let detail = folderErrors.isEmpty ? "No folders synced" : folderErrors.joined(separator: " | ")
             throw GraphError.unexpected("Graph sync failed — \(detail)")
         }
 
         var status = "Synced \(all.count) messages via Microsoft Graph"
-        if prunable.contains(folderIDs.inbox) && prunable.contains(folderIDs.sent) {
-            status += " (Inbox + Sent)"
-        } else if prunable.contains(folderIDs.inbox) {
-            status += " (Inbox only)"
-        } else {
-            status += " (Sent only)"
+        var parts: [String] = []
+        if prunable.contains(folderIDs.inbox) { parts.append("Inbox") }
+        if prunable.contains(folderIDs.sent) { parts.append("Sent") }
+        if prunable.contains(folderIDs.archive) { parts.append("Archive") }
+        let customCount = prunable.subtracting([folderIDs.inbox, folderIDs.sent, folderIDs.archive, folderIDs.drafts, folderIDs.trash]).count
+        if customCount > 0 { parts.append("\(customCount) custom") }
+        if !parts.isEmpty {
+            status += " (" + parts.joined(separator: " + ") + ")"
+        }
+        if !remoteFolders.isEmpty {
+            status += " · \(remoteFolders.count) folders"
         }
         if !folderErrors.isEmpty {
             status += " — partial: \(folderErrors.joined(separator: " | "))"
         }
         let result = GraphSyncResult(
-            foldersFetched: prunable.count,
+            foldersFetched: max(prunable.count, remoteFolders.isEmpty ? 0 : 1),
             messagesFetched: all.count,
             status: status,
             signedInEmail: accountEmail
         )
-        return (all, result, prunable)
+        return (all, result, prunable, remoteFolders)
     }
+
+    // MARK: - Mail folders
+
+    /// Recursively list mailbox folders (root + children) for ladder / import picker.
+    static func listMailFolderTree(accessToken: String) async throws -> [GraphRemoteFolder] {
+        var collected: [GraphRemoteFolder] = []
+        var seen = Set<String>()
+        var queue: [String?] = [nil] // nil = root /me/mailFolders
+        while !queue.isEmpty {
+            try Task.checkCancellation()
+            let parent = queue.removeFirst()
+            let page = try await listMailFoldersPage(accessToken: accessToken, parentFolderID: parent)
+            for folder in page {
+                let id = folder.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !id.isEmpty, seen.insert(id).inserted else { continue }
+                collected.append(folder)
+                if folder.childFolderCount > 0 {
+                    queue.append(id)
+                }
+            }
+        }
+        return collected
+    }
+
+    private static func listMailFoldersPage(accessToken: String, parentFolderID: String?) async throws -> [GraphRemoteFolder] {
+        struct GraphFolderList: Decodable {
+            var value: [GraphFolderDTO]?
+            var nextLink: String?
+            enum CodingKeys: String, CodingKey {
+                case value
+                case nextLink = "@odata.nextLink"
+            }
+        }
+        let path: String
+        if let parentFolderID, !parentFolderID.isEmpty {
+            let enc = parentFolderID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? parentFolderID
+            path = "/me/mailFolders/\(enc)/childFolders"
+        } else {
+            path = "/me/mailFolders"
+        }
+        var nextURL: URL? = try makeURL(
+            path: path,
+            query: [
+                "$top": "100",
+                "$select": "id,displayName,parentFolderId,childFolderCount,totalItemCount",
+            ]
+        )
+        var out: [GraphRemoteFolder] = []
+        while let url = nextURL {
+            try Task.checkCancellation()
+            let list: GraphFolderList = try await getJSON(url: url, accessToken: accessToken)
+            for dto in list.value ?? [] {
+                guard let id = dto.id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { continue }
+                let name = (dto.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                out.append(
+                    GraphRemoteFolder(
+                        id: id,
+                        displayName: name.isEmpty ? "(unnamed)" : name,
+                        parentFolderId: dto.parentFolderId,
+                        childFolderCount: dto.childFolderCount ?? 0,
+                        totalItemCount: dto.totalItemCount ?? 0
+                    )
+                )
+            }
+            if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !link.isEmpty,
+               let parsed = URL(string: link) {
+                nextURL = parsed
+            } else {
+                nextURL = nil
+            }
+        }
+        return out
+    }
+
+    /// Create a mail folder at mailbox root, or as a child of `parentFolderID`.
+    @discardableResult
+    static func createMailFolder(
+        accessToken: String,
+        displayName: String,
+        parentFolderID: String? = nil
+    ) async throws -> GraphRemoteFolder {
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw GraphError.unexpected("Folder name required") }
+        let path: String
+        if let parent = parentFolderID?.trimmingCharacters(in: .whitespacesAndNewlines), !parent.isEmpty {
+            let enc = parent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? parent
+            path = "/me/mailFolders/\(enc)/childFolders"
+        } else {
+            path = "/me/mailFolders"
+        }
+        let data = try await postJSON(
+            path: path,
+            accessToken: accessToken,
+            body: ["displayName": name, "isHidden": false]
+        )
+        struct Created: Decodable {
+            var id: String?
+            var displayName: String?
+            var parentFolderId: String?
+            var childFolderCount: Int?
+            var totalItemCount: Int?
+        }
+        let created = try JSONDecoder().decode(Created.self, from: data)
+        guard let id = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+            throw GraphError.unexpected("Create folder returned no id")
+        }
+        return GraphRemoteFolder(
+            id: id,
+            displayName: (created.displayName ?? name).trimmingCharacters(in: .whitespacesAndNewlines),
+            parentFolderId: created.parentFolderId,
+            childFolderCount: created.childFolderCount ?? 0,
+            totalItemCount: created.totalItemCount ?? 0
+        )
+    }
+
+    /// Rename a Graph mail folder when the remote id is known.
+    static func renameMailFolder(
+        accessToken: String,
+        folderID: String,
+        displayName: String
+    ) async throws {
+        let id = folderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { throw GraphError.unexpected("Missing folder id") }
+        guard !name.isEmpty else { throw GraphError.unexpected("Folder name required") }
+        let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        _ = try await patchJSON(
+            path: "/me/mailFolders/\(enc)",
+            accessToken: accessToken,
+            body: ["displayName": name]
+        )
+    }
+
+    /// Map common display names (Zoho / local disk trees) onto Graph well-known folder names.
+    static func mapDiskFolderNameToWellKnown(_ name: String) -> String? {
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "inbox", "in box":
+            return "inbox"
+        case "sent", "sent items", "sentitems", "sent mail", "sentmail":
+            return "sentitems"
+        case "drafts", "draft":
+            return "drafts"
+        case "archive", "archived":
+            return "archive"
+        case "trash", "deleted", "deleted items", "deleteditems":
+            return "deleteditems"
+        case "junk", "junk email", "junkemail", "spam":
+            return "junkemail"
+        default:
+            return nil
+        }
+    }
+
+    static func wellKnownGraphName(for kind: FolderKind) -> String? {
+        switch kind {
+        case .inbox: return "inbox"
+        case .sent: return "sentitems"
+        case .drafts: return "drafts"
+        case .archive: return "archive"
+        case .trash: return "deleteditems"
+        case .junk: return "junkemail"
+        default: return nil
+        }
+    }
+
+    static func folderKind(forDisplayName name: String) -> FolderKind? {
+        guard let well = mapDiskFolderNameToWellKnown(name) else { return nil }
+        switch well {
+        case "inbox": return .inbox
+        case "sentitems": return .sent
+        case "drafts": return .drafts
+        case "archive": return .archive
+        case "deleteditems": return .trash
+        case "junkemail": return .junk
+        default: return nil
+        }
+    }
+
+
 
 
     /// Fetch full body for one message (reading pane). Safe to call after lightweight list sync.
@@ -820,7 +1067,9 @@ enum MicrosoftGraphMailService {
         // Lightweight list only — no `body` (HTML payloads hung sync). Bodies load on open.
         let select = "id,internetMessageId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
         // Sent Items sorts more reliably by sentDateTime; Inbox by receivedDateTime.
-        let orderby = folderPath.contains("sentitems") ? "sentDateTime desc" : "receivedDateTime desc"
+        let orderby = (folderPath.lowercased().contains("sentitems") || mailboxKey.lowercased().contains("sent"))
+            ? "sentDateTime desc"
+            : "receivedDateTime desc"
         var nextURL: URL? = try makeURL(
             path: folderPath,
             query: [
@@ -1159,6 +1408,14 @@ enum MicrosoftGraphMailService {
 }
 
 // MARK: - Graph DTOs
+
+private struct GraphFolderDTO: Decodable {
+    var id: String?
+    var displayName: String?
+    var parentFolderId: String?
+    var childFolderCount: Int?
+    var totalItemCount: Int?
+}
 
 private struct GraphMessage: Decodable {
     var id: String?

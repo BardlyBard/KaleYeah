@@ -9,7 +9,9 @@ struct MailboxLadderView: View {
     @State private var expandedByAccount: [UUID: Bool] = [:]
     @State private var renameAccountTarget: MailAccount?
     @State private var renameFolderTarget: MailFolder?
+    @State private var newFolderAccount: MailAccount?
     @State private var renameText = ""
+    @State private var newFolderBusy = false
 
     private static let expandDefaultsKey = "rapSoDee.accountMailboxExpanded"
 
@@ -117,6 +119,27 @@ struct MailboxLadderView: View {
             }
             .preferredColorScheme(.light)
         }
+        .sheet(item: $newFolderAccount) { account in
+            RenameSheet(
+                title: "New Folder",
+                prompt: "Folder name",
+                text: $renameText
+            ) {
+                let name = renameText
+                newFolderBusy = true
+                Task { @MainActor in
+                    defer {
+                        newFolderBusy = false
+                        newFolderAccount = nil
+                    }
+                    _ = await store.createOffice365Folder(displayName: name)
+                }
+            } onCancel: {
+                newFolderAccount = nil
+            }
+            .preferredColorScheme(.light)
+            .disabled(newFolderBusy)
+        }
     }
 
     // MARK: - Account card (one soft tinted blob per account)
@@ -169,6 +192,12 @@ struct MailboxLadderView: View {
                 Button("Rename Account…") {
                     renameText = account.name
                     renameAccountTarget = account
+                }
+                if account.isLiveOffice365 {
+                    Button("New Folder…") {
+                        renameText = ""
+                        newFolderAccount = account
+                    }
                 }
             }
 

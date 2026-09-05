@@ -309,6 +309,68 @@ final class DemoMailStore: MailStore {
         guard !trimmed.isEmpty else { return }
         folders[i].name = trimmed
         MailDisplayNames.setFolderName(trimmed, for: folderID)
+        // Best-effort Graph rename for custom folders with a real remote id.
+        let folder = folders[i]
+        guard folder.kind == .custom,
+              let remote = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !remote.isEmpty,
+              folder.accountID.flatMap({ account(for: $0)?.isLiveOffice365 }) == true
+        else { return }
+        Task { @MainActor in
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: Office365Defaults.defaultEmail
+                )
+                try await MicrosoftGraphMailService.renameMailFolder(
+                    accessToken: token,
+                    folderID: remote,
+                    displayName: trimmed
+                )
+            } catch {
+                // Local rename already applied; surface quietly.
+                NSLog("Graph folder rename failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Create a mail folder on Graph and add it to the ladder / import picker.
+    @discardableResult
+    func createOffice365Folder(displayName: String, parentRemoteID: String? = nil) async -> MailFolder? {
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            office365LastError = "Folder name required"
+            return nil
+        }
+        restoreOffice365AccountShellIfNeeded()
+        guard let account = office365Account() else {
+            office365LastError = "Sign in to Microsoft 365 first"
+            office365NeedsSetup = true
+            return nil
+        }
+        do {
+            let token = try await MSALAuthService.shared.acquireAccessToken(
+                interactiveIfNeeded: false,
+                loginHint: account.email
+            )
+            let created = try await MicrosoftGraphMailService.createMailFolder(
+                accessToken: token,
+                displayName: name,
+                parentFolderID: parentRemoteID
+            )
+            _ = upsertGraphRemoteFolders(accountID: account.id, remoteFolders: [created])
+            office365SyncStatus = "Created folder “\(created.displayName)”"
+            office365LastError = nil
+            return folders.first { $0.accountID == account.id && $0.remoteID == created.id }
+        } catch {
+            let detail = error.localizedDescription
+            office365LastError = detail
+            office365SyncStatus = "Create folder failed — \(String(detail.prefix(160)))"
+            if Self.isSilentAuthFailure(error) {
+                office365NeedsSetup = true
+            }
+            return nil
+        }
     }
 
     func displayName(for folder: MailFolder) -> String {
@@ -722,11 +784,11 @@ final class DemoMailStore: MailStore {
             accounts[idx].sortOrder = idx
         }
         let base = -10
-        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true)
-        let sent = MailFolder(accountID: id, name: "Sent", kind: .sent, sortOrder: base + 1)
-        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2)
-        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3)
-        let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
+        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true, remoteID: "inbox")
+        let sent = MailFolder(accountID: id, name: "Sent Items", kind: .sent, sortOrder: base + 1, remoteID: "sentitems")
+        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2, remoteID: "drafts")
+        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3, remoteID: "archive")
+        let trash = MailFolder(accountID: id, name: "Deleted Items", kind: .trash, sortOrder: base + 4, remoteID: "deleteditems")
         folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
         GmailSyncService.rememberAccount(email: email, id: id)
         applyPersistedDisplayNames()
@@ -909,19 +971,177 @@ final class DemoMailStore: MailStore {
     /// Recreate Inbox/Sent/Drafts/Archive/Trash if an account shell lost its folders
     /// (e.g. after demo seed removal left selection pointing at dead IDs).
     private func ensureStandardMailFolders(for accountID: UUID, baseSort: Int) {
-        let kinds: [(FolderKind, String, Int, Bool)] = [
-            (.inbox, "Inbox", baseSort, true),
-            (.sent, "Sent", baseSort + 1, false),
-            (.drafts, "Drafts", baseSort + 2, false),
-            (.archive, "Archive", baseSort + 3, false),
-            (.trash, "Trash", baseSort + 4, false),
+        let kinds: [(FolderKind, String, Int, Bool, String)] = [
+            (.inbox, "Inbox", baseSort, true, "inbox"),
+            (.sent, "Sent Items", baseSort + 1, false, "sentitems"),
+            (.drafts, "Drafts", baseSort + 2, false, "drafts"),
+            (.archive, "Archive", baseSort + 3, false, "archive"),
+            (.trash, "Deleted Items", baseSort + 4, false, "deleteditems"),
         ]
-        for (kind, name, order, pinned) in kinds {
-            if folders.contains(where: { $0.accountID == accountID && $0.kind == kind }) { continue }
+        for (kind, name, order, pinned, remote) in kinds {
+            if let idx = folders.firstIndex(where: { $0.accountID == accountID && $0.kind == kind }) {
+                // Keep existing UUID; ensure Graph well-known remote id is stamped for import.
+                if folders[idx].remoteID == nil || folders[idx].remoteID?.isEmpty == true {
+                    folders[idx].remoteID = remote
+                }
+                // Prefer Outlook-style names once we know this is M365.
+                if kind == .sent, folders[idx].name == "Sent" {
+                    folders[idx].name = "Sent Items"
+                }
+                if kind == .trash, folders[idx].name == "Trash" {
+                    folders[idx].name = "Deleted Items"
+                }
+                continue
+            }
             folders.append(
-                MailFolder(accountID: accountID, name: name, kind: kind, sortOrder: order, isPinned: pinned)
+                MailFolder(
+                    accountID: accountID,
+                    name: name,
+                    kind: kind,
+                    sortOrder: order,
+                    isPinned: pinned,
+                    remoteID: remote
+                )
             )
         }
+    }
+
+    /// Named destinations for the EML import picker (Inbox / Sent Items / Archive / Drafts / customs).
+    func office365EMLImportOptions() -> [EMLImportFolderOption] {
+        guard let account = office365Account() else {
+            return [
+                EMLImportFolderOption(id: "inbox", title: "Inbox", graphFolderID: "inbox", isCustom: false),
+                EMLImportFolderOption(id: "sentitems", title: "Sent Items", graphFolderID: "sentitems", isCustom: false),
+                EMLImportFolderOption(id: "archive", title: "Archive", graphFolderID: "archive", isCustom: false),
+                EMLImportFolderOption(id: "drafts", title: "Drafts", graphFolderID: "drafts", isCustom: false),
+            ]
+        }
+        ensureStandardMailFolders(for: account.id, baseSort: -20)
+        var options: [EMLImportFolderOption] = []
+        var seen = Set<String>()
+        let preferred: [(FolderKind, String, String)] = [
+            (.inbox, "Inbox", "inbox"),
+            (.sent, "Sent Items", "sentitems"),
+            (.archive, "Archive", "archive"),
+            (.drafts, "Drafts", "drafts"),
+        ]
+        for (kind, title, well) in preferred {
+            if let folder = folders.first(where: { $0.accountID == account.id && $0.kind == kind }) {
+                let gid = (folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? well
+                if seen.insert(gid).inserted {
+                    options.append(EMLImportFolderOption(id: gid, title: title, graphFolderID: gid, isCustom: false))
+                }
+            } else if seen.insert(well).inserted {
+                options.append(EMLImportFolderOption(id: well, title: title, graphFolderID: well, isCustom: false))
+            }
+        }
+        let customs = folders
+            .filter { $0.accountID == account.id && $0.kind == .custom }
+            .sorted { $0.sortOrder < $1.sortOrder || ($0.sortOrder == $1.sortOrder && $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending) }
+        for folder in customs {
+            guard let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !rid.isEmpty else { continue }
+            if seen.insert(rid).inserted {
+                options.append(
+                    EMLImportFolderOption(
+                        id: rid,
+                        title: displayName(for: folder),
+                        graphFolderID: rid,
+                        isCustom: true
+                    )
+                )
+            }
+        }
+        return options
+    }
+
+    /// Upsert Graph folder tree into the ladder. Well-known map by kind; customs by remoteID.
+    @discardableResult
+    func upsertGraphRemoteFolders(
+        accountID: UUID,
+        remoteFolders: [MicrosoftGraphMailService.GraphRemoteFolder]
+    ) -> [(localFolderID: UUID, graphFolderID: String)] {
+        ensureStandardMailFolders(for: accountID, baseSort: -20)
+        var remoteIDToLocal: [String: UUID] = [:]
+        for folder in folders where folder.accountID == accountID {
+            if let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !rid.isEmpty {
+                remoteIDToLocal[rid] = folder.id
+            }
+        }
+
+        // First pass: stamp well-known remote IDs from Graph rows.
+        for remote in remoteFolders {
+            let kind = MicrosoftGraphMailService.folderKind(forDisplayName: remote.displayName)
+            if let kind, let idx = folders.firstIndex(where: { $0.accountID == accountID && $0.kind == kind }) {
+                folders[idx].remoteID = remote.id
+                remoteIDToLocal[remote.id] = folders[idx].id
+                // Keep ladder labels aligned with Outlook names when Graph provides them.
+                if kind == .sent || kind == .trash || kind == .junk {
+                    folders[idx].name = remote.displayName
+                }
+            }
+        }
+
+        // Second pass: customs (and any non-well-known).
+        let baseSort = (folders.filter { $0.accountID == accountID }.map(\.sortOrder).max() ?? -20) + 1
+        var nextSort = baseSort
+        var messageSyncTargets: [(localFolderID: UUID, graphFolderID: String)] = []
+        let recentImportIDs = Set(Self.recentImportGraphFolderIDs())
+
+        for remote in remoteFolders {
+            if MicrosoftGraphMailService.folderKind(forDisplayName: remote.displayName) != nil {
+                continue
+            }
+            let rid = remote.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rid.isEmpty else { continue }
+            let parentLocal: UUID? = {
+                guard let pid = remote.parentFolderId?.trimmingCharacters(in: .whitespacesAndNewlines), !pid.isEmpty else { return nil }
+                return remoteIDToLocal[pid]
+            }()
+            if let idx = folders.firstIndex(where: { $0.accountID == accountID && $0.remoteID == rid }) {
+                folders[idx].name = remote.displayName
+                folders[idx].parentFolderID = parentLocal
+                remoteIDToLocal[rid] = folders[idx].id
+                if recentImportIDs.contains(rid) || remote.totalItemCount > 0 {
+                    messageSyncTargets.append((folders[idx].id, rid))
+                }
+                continue
+            }
+            let local = MailFolder(
+                accountID: accountID,
+                name: remote.displayName,
+                kind: .custom,
+                sortOrder: nextSort,
+                isPinned: false,
+                remoteID: rid,
+                parentFolderID: parentLocal
+            )
+            nextSort += 1
+            folders.append(local)
+            remoteIDToLocal[rid] = local.id
+            if recentImportIDs.contains(rid) || remote.totalItemCount > 0 {
+                messageSyncTargets.append((local.id, rid))
+            }
+        }
+
+        // Cap custom message sync so Sync stays inside the hard timeout.
+        return Array(messageSyncTargets.prefix(8))
+    }
+
+    private static let recentImportKey = "rapSoDee.office365.recentImportFolderIDs"
+
+    private static func recentImportGraphFolderIDs() -> [String] {
+        (UserDefaults.standard.stringArray(forKey: recentImportKey) ?? []).filter { !$0.isEmpty }
+    }
+
+    private static func rememberImportGraphFolderID(_ id: String) {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Skip pure well-known — those always sync.
+        let wellKnown: Set<String> = ["inbox", "sentitems", "archive", "drafts", "deleteditems", "junkemail"]
+        if wellKnown.contains(trimmed.lowercased()) { return }
+        var list = recentImportGraphFolderIDs().filter { $0 != trimmed }
+        list.insert(trimmed, at: 0)
+        UserDefaults.standard.set(Array(list.prefix(12)), forKey: recentImportKey)
     }
 
     /// True when `selection` still resolves to a live folder / account after demo removal.
@@ -1058,11 +1278,11 @@ final class DemoMailStore: MailStore {
             accounts[idx].sortOrder = idx
         }
         let base = -20
-        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true)
-        let sent = MailFolder(accountID: id, name: "Sent", kind: .sent, sortOrder: base + 1)
-        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2)
-        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3)
-        let trash = MailFolder(accountID: id, name: "Trash", kind: .trash, sortOrder: base + 4)
+        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true, remoteID: "inbox")
+        let sent = MailFolder(accountID: id, name: "Sent Items", kind: .sent, sortOrder: base + 1, remoteID: "sentitems")
+        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2, remoteID: "drafts")
+        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3, remoteID: "archive")
+        let trash = MailFolder(accountID: id, name: "Deleted Items", kind: .trash, sortOrder: base + 4, remoteID: "deleteditems")
         folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
         Office365SyncService.rememberAccount(email: email, id: id)
         applyPersistedDisplayNames()
@@ -1367,14 +1587,32 @@ final class DemoMailStore: MailStore {
                 let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
                 try Task.checkCancellation()
                 guard generation == self.office365SyncGeneration else { throw CancellationError() }
-                let (fetched, result, prunable) = try await MicrosoftGraphMailService.sync(
+                // Upsert folder names first so ladder/picker fill even if message list is partial.
+                // Extra message sync targets = recently imported customs (capped inside upsert).
+                var extraTargets: [(localFolderID: UUID, graphFolderID: String)] = []
+                // List folders up-front when possible so SyncPayload can carry them; sync() also lists.
+                let (fetched, result, prunable, remoteFolders) = try await MicrosoftGraphMailService.sync(
                     accessToken: token,
                     accountID: accountID,
                     folderIDs: folderIDs,
-                    accountEmail: email
+                    accountEmail: email,
+                    extraMessageFolders: {
+                        // Build extras from current ladder customs marked recent / non-empty after a prior upsert.
+                        let recent = Set(Self.recentImportGraphFolderIDs())
+                        return self.folders.compactMap { folder -> (UUID, String)? in
+                            guard folder.accountID == accountID, folder.kind == .custom,
+                                  let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !rid.isEmpty, recent.contains(rid) else { return nil }
+                            return (folder.id, rid)
+                        }
+                    }()
                 )
                 try Task.checkCancellation()
                 guard generation == self.office365SyncGeneration else { throw CancellationError() }
+                // Apply folder tree on the main actor before returning (we are already on MainActor).
+                extraTargets = self.upsertGraphRemoteFolders(accountID: accountID, remoteFolders: remoteFolders)
+                // If sync didn't already pull recent customs (first run), that's OK — next Sync will.
+                _ = extraTargets
                 return SyncPayload(
                     email: email,
                     messages: fetched,
@@ -1476,6 +1714,9 @@ final class DemoMailStore: MailStore {
     func importEMLIntoMicrosoft365(
         destination: EMLImportDestination = .inbox,
         customFolderID: String? = nil,
+        /// When set (Settings picker), takes precedence over destination / customFolderID.
+        graphFolderID: String? = nil,
+        destinationTitle: String? = nil,
         onDeviceCodePrompt: (@MainActor (MSALDeviceCodePrompt) -> Void)? = nil
     ) async {
         if emlImportIsRunning { return }
@@ -1491,21 +1732,34 @@ final class DemoMailStore: MailStore {
         }
 
         let folderID: String
-        if destination == .custom {
+        let destLabel: String
+        if let gid = graphFolderID?.trimmingCharacters(in: .whitespacesAndNewlines), !gid.isEmpty {
+            folderID = gid
+            let trimmedTitle = destinationTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedTitle.isEmpty {
+                destLabel = trimmedTitle
+            } else if let optTitle = office365EMLImportOptions().first(where: { $0.graphFolderID == gid })?.title {
+                destLabel = optTitle
+            } else {
+                destLabel = gid
+            }
+        } else if destination == .custom {
             let custom = (customFolderID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !custom.isEmpty else {
                 office365LastError = "Enter a Graph mailFolder id for Custom destination."
                 return
             }
             folderID = custom
+            destLabel = destinationTitle ?? "Custom"
         } else {
             folderID = destination.wellKnownName ?? "inbox"
+            destLabel = destinationTitle ?? destination.title
         }
 
         emlImportIsRunning = true
         emlImportProgress = .empty(total: files.count)
         office365LastError = nil
-        office365SyncStatus = "Importing \(files.count) EML file(s) into \(destination.title)…"
+        office365SyncStatus = "Importing \(files.count) EML file(s) into \(destLabel)…"
 
         let work = Task { @MainActor in
             defer {
@@ -1548,6 +1802,8 @@ final class DemoMailStore: MailStore {
                 } else {
                     self.office365LastError = nil
                 }
+
+                Self.rememberImportGraphFolderID(folderID)
 
                 // Refresh RapSoDee list from Graph so imported mail appears.
                 if progress.imported > 0 || progress.skippedDuplicates > 0 {
