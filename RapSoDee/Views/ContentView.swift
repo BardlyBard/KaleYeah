@@ -40,10 +40,12 @@ struct ContentView: View {
         }
         .searchable(text: Bindable(store).searchText, placement: .toolbar, prompt: "Search from, subject, snippet")
         .toolbar { toolbarContent }
+        .preferredColorScheme(.light)
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environment(store)
                 .frame(minWidth: 520, minHeight: 420)
+                .preferredColorScheme(.light)
         }
         .sheet(item: $fileTarget) { message in
             FilePickerSheet(message: message) { folderID in
@@ -51,12 +53,14 @@ struct ContentView: View {
                 fileTarget = nil
             }
             .environment(store)
+            .preferredColorScheme(.light)
         }
         .sheet(item: $snoozeTarget) { message in
             SnoozeSheet { date in
                 store.snooze(message.id, until: date)
                 snoozeTarget = nil
             }
+            .preferredColorScheme(.light)
         }
         .onAppear {
             hydrateFlagsIfNeeded()

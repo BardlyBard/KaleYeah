@@ -10,8 +10,14 @@ final class RapSoDeeAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Dark Muse theming is broken — lock the whole app to light/aqua permanently.
+        NSApp.appearance = NSAppearance(named: .aqua)
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
-        // No-op; useful hook if we later drain a pending auth redirect.
+        // Re-assert in case something else flips appearance.
+        NSApp.appearance = NSAppearance(named: .aqua)
     }
 }
 
@@ -50,6 +56,7 @@ struct RapSoDeeApp: App {
             ContentView()
                 .environment(store)
                 .tint(MuseTheme.leaf)
+                .preferredColorScheme(.light)
                 .onOpenURL { url in
                     MSALAuthService.handle(url: url)
                 }
@@ -65,9 +72,11 @@ struct RapSoDeeApp: App {
                 ComposeView(draft: draft, isPopOut: true)
                     .environment(store)
                     .tint(MuseTheme.leaf)
+                    .preferredColorScheme(.light)
             } else {
                 Text("Compose window closed")
                     .padding()
+                    .preferredColorScheme(.light)
             }
         }
         .defaultSize(width: 720, height: 560)

@@ -75,6 +75,7 @@ struct ReadingPaneView: View {
         }
         .sheet(item: $previewAttachment) { attachment in
             AttachmentPreviewSheet(attachment: attachment)
+                .preferredColorScheme(.light)
         }
         .alert("Blocked attachment type", isPresented: $showBlockedAlert) {
             Button("OK", role: .cancel) {}

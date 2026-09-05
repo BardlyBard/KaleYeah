@@ -102,6 +102,7 @@ struct MailboxLadderView: View {
             } onCancel: {
                 renameAccountTarget = nil
             }
+            .preferredColorScheme(.light)
         }
         .sheet(item: $renameFolderTarget) { folder in
             RenameSheet(
@@ -114,6 +115,7 @@ struct MailboxLadderView: View {
             } onCancel: {
                 renameFolderTarget = nil
             }
+            .preferredColorScheme(.light)
         }
     }
 
