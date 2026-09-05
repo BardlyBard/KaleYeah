@@ -53,6 +53,10 @@ final class DemoMailStore: MailStore {
     /// Prevent overlapping Sync all / auto-sync runs.
     private var syncAllInFlight: Bool = false
 
+    /// Remote IDs deleted locally — sync must not resurrect them until the server also drops them
+    /// (or the user undeletes on the server, in which case a later sync can clear the tombstone).
+    private var deletedRemoteIDs: Set<String> = []
+
     var isAnyLiveSyncing: Bool {
         isUniversalSyncing || gmailIsSyncing || office365IsSyncing
     }
@@ -70,6 +74,7 @@ final class DemoMailStore: MailStore {
         office365SyncStartedAt = nil
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
+        loadMessageCacheFromDisk()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
         office365NeedsSetup = MSALAppConfig.rememberedSignedInEmail == nil
     }
@@ -174,10 +179,57 @@ final class DemoMailStore: MailStore {
 
     func deleteRecessed(_ id: UUID) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
-        if let dest = folders.first(where: { $0.kind == .trash && $0.accountID == messages[i].accountID }) {
+        let message = messages[i]
+        let account = account(for: message.accountID)
+
+        // Local: move to account Trash (or shared Trash) immediately so UI never waits on network.
+        if let dest = folders.first(where: { $0.kind == .trash && $0.accountID == message.accountID }) {
             messages[i].folderID = dest.id
         } else {
             messages[i].folderID = trashFolderID
+        }
+        messages[i].snoozeUntil = nil
+
+        if let remote = normalizedRemoteID(message.remoteID) {
+            deletedRemoteIDs.insert(remote)
+            MailMessageCache.saveDeletedRemoteIDs(deletedRemoteIDs)
+        }
+        persistMessageCache()
+
+        // Server: Graph Deleted Items / IMAP Trash — fire and forget after local move.
+        Task { await self.deleteMessageOnServer(message, account: account) }
+    }
+
+    private func deleteMessageOnServer(_ message: MailMessage, account: MailAccount?) async {
+        guard let account else { return }
+        guard let remote = normalizedRemoteID(message.remoteID),
+              !remote.hasPrefix(Self.optimisticRemotePrefix) else { return }
+
+        if account.isLiveOffice365 {
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: account.email
+                )
+                try await MicrosoftGraphMailService.deleteMessage(accessToken: token, graphMessageID: remote)
+            } catch {
+                // Keep tombstone + local trash; next sync still will not resurrect.
+                office365LastError = "Delete failed: \(error.localizedDescription)"
+            }
+            return
+        }
+
+        if account.isLiveGmail {
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            do {
+                try await GmailSyncService.deleteRemoteMessage(
+                    email: account.email,
+                    password: password,
+                    remoteID: remote
+                )
+            } catch {
+                gmailLastError = "Delete failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -777,6 +829,7 @@ final class DemoMailStore: MailStore {
             for msg in newOnes.prefix(3) {
                 applyNotificationPolicy(for: msg)
             }
+            persistMessageCache()
         } catch {
             gmailLastError = error.localizedDescription
             gmailSyncStatus = "Sync failed"
@@ -1346,6 +1399,7 @@ final class DemoMailStore: MailStore {
             for msg in newOnes.prefix(3) {
                 applyNotificationPolicy(for: msg)
             }
+            persistMessageCache()
         } catch is CancellationError {
             if generation == office365SyncGeneration {
                 office365SyncStatus = "Sync cancelled"
@@ -1696,7 +1750,29 @@ final class DemoMailStore: MailStore {
         var seenRemote = Set<String>()
         var seenInternetFolder = Set<String>()
         var newOnes: [MailMessage] = []
-        for var incoming in fetched {
+        // Drop tombstoned remotes from the fetch set so sync cannot resurrect deleted mail.
+        let activeFetched = fetched.filter { msg in
+            guard let r = normalizedRemoteID(msg.remoteID) else { return true }
+            return !deletedRemoteIDs.contains(r)
+        }
+        // Clear this account's tombstones once the server no longer returns them.
+        // While they still appear, activeFetched keeps suppressing resurrection.
+        // After clear, an undelete on the server can bring the message back on a later sync.
+        if !fetched.isEmpty {
+            let fetchedRemotes = Set(fetched.compactMap { normalizedRemoteID($0.remoteID) })
+            let localRemotes = Set(messages.compactMap { m -> String? in
+                guard m.accountID == accountID else { return nil }
+                return normalizedRemoteID(m.remoteID)
+            })
+            let cleared = deletedRemoteIDs.filter { tomb in
+                (localRemotes.contains(tomb) || fetchedRemotes.contains(tomb)) && !fetchedRemotes.contains(tomb)
+            }
+            if !cleared.isEmpty {
+                deletedRemoteIDs.subtract(cleared)
+                MailMessageCache.saveDeletedRemoteIDs(deletedRemoteIDs)
+            }
+        }
+        for var incoming in activeFetched {
             let remoteKey = normalizedRemoteID(incoming.remoteID)
             let internetKey = normalizedInternetMessageId(incoming.internetMessageId)
             let internetFolderKey = internetKey.map { "\(incoming.folderID.uuidString)|\($0)" }
@@ -1892,6 +1968,33 @@ final class DemoMailStore: MailStore {
         }
         trimmed = trimmed.lowercased()
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // MARK: - Local message cache
+
+    private func loadMessageCacheFromDisk() {
+        deletedRemoteIDs = MailMessageCache.loadDeletedRemoteIDs()
+        let cached = MailMessageCache.loadMessages()
+        guard !cached.isEmpty else { return }
+        // Prefer cache over empty launch; account shells already restored so folder IDs match.
+        let knownAccountIDs = Set(accounts.map(\.id))
+        let usable = cached.filter { knownAccountIDs.contains($0.accountID) }
+        guard !usable.isEmpty else { return }
+        if messages.isEmpty {
+            messages = usable
+        } else {
+            // Merge cache under existing in-memory rows (should be empty at init).
+            let existing = Set(messages.map(\.id))
+            messages.append(contentsOf: usable.filter { !existing.contains($0.id) })
+        }
+        #if DEBUG
+        print("RapSoDee: restored \(usable.count) cached messages")
+        #endif
+    }
+
+    private func persistMessageCache() {
+        MailMessageCache.saveMessages(messages)
+        MailMessageCache.saveDeletedRemoteIDs(deletedRemoteIDs)
     }
 
     // MARK: - Seed

@@ -49,6 +49,15 @@ enum GmailSyncService {
         )
     }
 
+    static func deleteRemoteMessage(email: String, password: String, remoteID: String) async throws {
+        try await IMAPAccountSyncService.deleteRemoteMessage(
+            provider: provider,
+            email: email,
+            password: password,
+            remoteID: remoteID
+        )
+    }
+
     static func send(email: String, password: String, draft: ComposeDraft, signature: String?) async throws {
         try await IMAPAccountSyncService.send(
             provider: provider,

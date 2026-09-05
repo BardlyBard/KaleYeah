@@ -109,6 +109,48 @@ actor SimpleIMAPClient {
         conn = nil
     }
 
+    /// Move or flag-delete a message by UID in `mailbox`.
+    /// Prefer MOVE into `trashMailbox` (Gmail: `[Gmail]/Trash`); else STORE \\Deleted + EXPUNGE.
+    func deleteUID(_ uid: UInt32, mailbox: String, trashMailbox: String?) async throws {
+        _ = try await select(mailbox)
+        if let trash = trashMailbox?.trimmingCharacters(in: .whitespacesAndNewlines), !trash.isEmpty,
+           trash.caseInsensitiveCompare(mailbox) != .orderedSame {
+            let moveResp = try await tagged("UID MOVE \(uid) \(quote(trash))")
+            if moveResp.uppercased().contains(" OK") {
+                return
+            }
+            // Fall through to flag+expunge when MOVE unsupported.
+        }
+        let storeResp = try await tagged("UID STORE \(uid) +FLAGS (\\Deleted)")
+        guard storeResp.uppercased().contains(" OK") else {
+            throw MailNetError.unexpected(storeResp.isEmpty ? "UID STORE \\Deleted failed" : storeResp)
+        }
+        let expungeResp = try await tagged("EXPUNGE")
+        guard expungeResp.uppercased().contains(" OK") else {
+            throw MailNetError.unexpected(expungeResp.isEmpty ? "EXPUNGE failed" : expungeResp)
+        }
+    }
+
+    /// Resolve a trash mailbox from LIST (\\Trash / name heuristics), preferring Gmail's Trash.
+    func resolveTrashMailbox(from listed: [IMAPFolderInfo]? = nil) async throws -> String? {
+        let folders: [IMAPFolderInfo]
+        if let listed {
+            folders = listed
+        } else {
+            folders = try await listFolders()
+        }
+        if let gmail = folders.first(where: { $0.name == "[Gmail]/Trash" }) {
+            return gmail.name
+        }
+        if let byKind = folders.first(where: { $0.kind == .trash }) {
+            return byKind.name
+        }
+        return folders.first(where: {
+            let u = $0.name.uppercased()
+            return u.contains("TRASH") || u.contains("DELETED")
+        })?.name
+    }
+
     // MARK: - Internals
 
     private func tagged(_ command: String) async throws -> String {

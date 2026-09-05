@@ -131,6 +131,32 @@ enum MicrosoftGraphMailService {
         return (content, contentType == "html")
     }
 
+
+    // MARK: - Delete
+
+    /// Move a message to Deleted Items (soft delete). Falls back to hard DELETE if move fails.
+    static func deleteMessage(accessToken: String, graphMessageID: String, permanent: Bool = false) async throws {
+        let trimmed = graphMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GraphError.unexpected("Missing Graph message id for delete")
+        }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+        if permanent {
+            try await deleteHTTP(path: "/me/messages/\(encoded)", accessToken: accessToken)
+            return
+        }
+        do {
+            _ = try await postJSON(
+                path: "/me/messages/\(encoded)/move",
+                accessToken: accessToken,
+                body: ["destinationId": "deleteditems"]
+            )
+        } catch {
+            // Already gone or move unsupported — try hard delete once.
+            try await deleteHTTP(path: "/me/messages/\(encoded)", accessToken: accessToken)
+        }
+    }
+
     // MARK: - Send
 
     /// Sends via Graph. Uses mailbox identity of the signed-in `/me` user — never sets `from`
@@ -639,6 +665,33 @@ enum MicrosoftGraphMailService {
     @discardableResult
     private static func patchJSON(path: String, accessToken: String, body: [String: Any]) async throws -> Data {
         try await sendJSON(method: "PATCH", path: path, accessToken: accessToken, body: body)
+    }
+
+    private static func deleteHTTP(path: String, accessToken: String) async throws {
+        let url = try makeURL(path: path, query: [:])
+        var request = URLRequest(url: url, timeoutInterval: 25)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("IdType=\"ImmutableId\"", forHTTPHeaderField: "Prefer")
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw mapSessionError(error)
+        }
+        // 204 No Content is success; also treat 404 as already-deleted.
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 404 { return }
+            guard (200..<300).contains(http.statusCode) else {
+                let text = String(data: data, encoding: .utf8) ?? ""
+                throw GraphError.http(http.statusCode, text)
+            }
+            return
+        }
+        try throwIfNeeded(response: response, data: data)
     }
 
     private static func sendJSON(method: String, path: String, accessToken: String, body: [String: Any]) async throws -> Data {

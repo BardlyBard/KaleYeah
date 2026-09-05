@@ -119,6 +119,35 @@ enum IMAPAccountSyncService {
         return (all, listed, result)
     }
 
+    /// Parse `provider|mailbox|uid` remoteID and delete on the server (move to Trash when possible).
+    static func deleteRemoteMessage(
+        provider: MailIMAPProvider,
+        email: String,
+        password: String,
+        remoteID: String
+    ) async throws {
+        let parts = remoteID.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3 else {
+            throw MailNetError.unexpected("Bad IMAP remoteID for delete")
+        }
+        // remoteID format: provider|mailbox|uid — mailbox may itself contain "|" rarely; uid is last.
+        let uidString = parts.last!
+        guard let uid = UInt32(uidString) else {
+            throw MailNetError.unexpected("Bad IMAP UID in remoteID")
+        }
+        let mailbox = parts.dropFirst().dropLast().joined(separator: "|")
+        guard !mailbox.isEmpty else {
+            throw MailNetError.unexpected("Missing mailbox in remoteID")
+        }
+
+        let imap = SimpleIMAPClient()
+        try await imap.connect(host: provider.imapHost, port: provider.imapPort)
+        try await imap.login(email: email, password: password, stripSpaces: provider.stripPasswordSpaces)
+        let trash = try await imap.resolveTrashMailbox()
+        try await imap.deleteUID(uid, mailbox: mailbox, trashMailbox: trash)
+        await imap.logout()
+    }
+
     static func send(
         provider: MailIMAPProvider,
         email: String,
