@@ -95,7 +95,16 @@ enum EMLImportService {
         url.pathExtension.lowercased() == "eml"
     }
 
+    /// Inter-file pacing (serial import). Keeps under Graph IncomingBytes limits.
+    private static let interFileDelayNs: UInt64 = 400_000_000
+    /// Initial attempt + retries for the same file on 429.
+    private static let maxAttemptsPerFile = 5
+    private static let consecutiveThrottleSoftLimit = 3
+    private static let consecutiveThrottleHardLimit = 6
+
     /// Import each EML into the signed-in mailbox via Graph. Continues on per-file errors.
+    /// Serial (concurrency 1): honors Retry-After / exponential backoff on 429; only counts a
+    /// file failed after retries are exhausted. Message-ID duplicate skip still applies.
     static func importFiles(
         _ files: [URL],
         accessToken: String,
@@ -107,6 +116,7 @@ enum EMLImportService {
         guard !files.isEmpty else { return progress }
 
         var seenMessageIDs = Set<String>()
+        var consecutiveThrottles = 0
 
         for (index, fileURL) in files.enumerated() {
             if Task.isCancelled {
@@ -133,42 +143,64 @@ enum EMLImportService {
                         try? await Task.sleep(nanoseconds: 50_000_000)
                         continue
                     }
-                    if try await MicrosoftGraphMailService.messageExists(
-                        accessToken: accessToken,
-                        internetMessageId: mid
+                    let exists = try await withGraphThrottleRetry(
+                        fileName: name,
+                        progress: &progress,
+                        consecutiveThrottles: &consecutiveThrottles,
+                        onProgress: onProgress
                     ) {
+                        try await MicrosoftGraphMailService.messageExists(
+                            accessToken: accessToken,
+                            internetMessageId: mid
+                        )
+                    }
+                    if exists {
                         seenMessageIDs.insert(key)
                         progress.skippedDuplicates += 1
                         progress.completed += 1
                         progress.statusLine = "Skipped existing \(name)"
                         await onProgress(progress)
-                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        try? await Task.sleep(nanoseconds: interFileDelayNs)
                         continue
                     }
                     seenMessageIDs.insert(key)
                 }
 
-                _ = try await MicrosoftGraphMailService.importEML(
-                    accessToken: accessToken,
-                    folderID: destinationFolderID,
-                    parsed: parsed
-                )
+                _ = try await withGraphThrottleRetry(
+                    fileName: name,
+                    progress: &progress,
+                    consecutiveThrottles: &consecutiveThrottles,
+                    onProgress: onProgress
+                ) {
+                    try await MicrosoftGraphMailService.importEML(
+                        accessToken: accessToken,
+                        folderID: destinationFolderID,
+                        parsed: parsed
+                    )
+                }
+                consecutiveThrottles = 0
                 progress.imported += 1
                 progress.completed += 1
                 progress.statusLine = "Imported \(progress.imported)/\(progress.total)"
                 await onProgress(progress)
+            } catch is CancellationError {
+                progress.statusLine = "Cancelled — \(progress.imported)/\(progress.total) imported"
+                await onProgress(progress)
+                break
             } catch {
                 let reason = String(error.localizedDescription.prefix(200))
                 progress.failures.append((file: name, reason: reason))
                 progress.completed += 1
                 progress.statusLine = "Failed \(name): \(reason)"
                 await onProgress(progress)
-                if reason.contains("429") || reason.localizedCaseInsensitiveContains("throttl") {
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if MicrosoftGraphMailService.isThrottlingError(error) {
+                    consecutiveThrottles += 1
+                } else {
+                    consecutiveThrottles = 0
                 }
             }
 
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: interFileDelayNs)
         }
 
         let failNote = progress.failures.isEmpty ? "" : ", \(progress.failures.count) failed"
@@ -177,6 +209,50 @@ enum EMLImportService {
         progress.statusLine = "Done — \(progress.imported)/\(progress.total) imported\(skipNote)\(failNote)"
         await onProgress(progress)
         return progress
+    }
+
+    /// Retry the same Graph call a few times on 429 before the caller counts a failure.
+    private static func withGraphThrottleRetry<T>(
+        fileName: String,
+        progress: inout EMLImportProgress,
+        consecutiveThrottles: inout Int,
+        onProgress: @MainActor @escaping (EMLImportProgress) -> Void,
+        operation: () async throws -> T
+    ) async throws -> T {
+        var attempt = 0
+        while true {
+            attempt += 1
+            do {
+                return try await operation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard MicrosoftGraphMailService.isThrottlingError(error),
+                      attempt < maxAttemptsPerFile else {
+                    throw error
+                }
+                consecutiveThrottles += 1
+                let retryAfter = MicrosoftGraphMailService.retryAfterSeconds(from: error)
+                // Exponential backoff: 2s, 4s, 8s, 16s… capped; honor Retry-After when larger.
+                var wait = retryAfter ?? min(60, pow(2.0, Double(attempt)))
+                if let retryAfter {
+                    wait = max(wait, retryAfter)
+                }
+                if consecutiveThrottles >= consecutiveThrottleSoftLimit {
+                    wait = max(wait, 15)
+                }
+                if consecutiveThrottles >= consecutiveThrottleHardLimit {
+                    wait = max(wait, 30)
+                }
+                wait = min(max(wait, 1), 120)
+                let secs = Int(ceil(wait))
+                progress.statusLine = "Microsoft throttled — waiting \(secs)s… (\(fileName))"
+                await onProgress(progress)
+                try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000.0))
+                progress.statusLine = "Retrying \(fileName) (attempt \(attempt + 1)/\(maxAttemptsPerFile))…"
+                await onProgress(progress)
+            }
+        }
     }
 
     /// Present an NSOpenPanel for a folder and/or multiple `.eml` files.

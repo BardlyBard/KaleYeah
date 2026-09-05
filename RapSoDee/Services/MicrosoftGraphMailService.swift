@@ -28,7 +28,8 @@ enum MicrosoftGraphMailService {
         config.timeoutIntervalForRequest = 90
         config.timeoutIntervalForResource = 120
         config.waitsForConnectivity = false
-        config.httpMaximumConnectionsPerHost = 2
+        // Serial EML uploads — IncomingBytes throttle is app-wide.
+        config.httpMaximumConnectionsPerHost = 1
         return URLSession(configuration: config)
     }()
 
@@ -771,6 +772,11 @@ enum MicrosoftGraphMailService {
                 )
                 throw error
             }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as GraphError where error.isThrottled {
+            // Do not burn more IncomingBytes with a JSON fallback while throttled.
+            throw error
         } catch {
             // MIME path unavailable — parse-based JSON create.
             return try await createParsedMessageInFolder(
@@ -1320,6 +1326,9 @@ enum MicrosoftGraphMailService {
             if http.statusCode == 404 { return }
             guard (200..<300).contains(http.statusCode) else {
                 let text = String(data: data, encoding: .utf8) ?? ""
+                if http.statusCode == 429 {
+                    throw GraphError.throttled(retryAfter: parseRetryAfter(http), detail: text)
+                }
                 throw GraphError.http(http.statusCode, text)
             }
             return
@@ -1353,8 +1362,48 @@ enum MicrosoftGraphMailService {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
             let text = String(data: data, encoding: .utf8) ?? ""
+            if http.statusCode == 429 {
+                throw GraphError.throttled(retryAfter: parseRetryAfter(http), detail: text)
+            }
             throw GraphError.http(http.statusCode, text)
         }
+    }
+
+    /// Parse Retry-After as delay-seconds or HTTP-date.
+    private static func parseRetryAfter(_ http: HTTPURLResponse) -> TimeInterval? {
+        guard let raw = http.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        if let seconds = Double(raw) {
+            return max(0, seconds)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: raw) {
+            return max(0, date.timeIntervalSinceNow)
+        }
+        return nil
+    }
+
+    /// True for Graph 429 / ApplicationThrottled / IncomingBytes limit errors.
+    static func isThrottlingError(_ error: Error) -> Bool {
+        if let ge = error as? GraphError {
+            return ge.isThrottled
+        }
+        let desc = error.localizedDescription
+        return desc.contains("429")
+            || desc.localizedCaseInsensitiveContains("throttl")
+            || desc.localizedCaseInsensitiveContains("IncomingBytes")
+            || desc.localizedCaseInsensitiveContains("ApplicationThrottled")
+    }
+
+    static func retryAfterSeconds(from error: Error) -> TimeInterval? {
+        if let ge = error as? GraphError, case .throttled(let retryAfter, _) = ge {
+            return retryAfter
+        }
+        return nil
     }
 
     /// Pull Graph `error.message` / `code` for UI; never include mail body.
@@ -1381,12 +1430,35 @@ enum MicrosoftGraphMailService {
         case unexpected(String)
         case http(Int, String)
         case timedOut(String)
+        /// ApplicationThrottled / IncomingBytes — honor Retry-After when present.
+        case throttled(retryAfter: TimeInterval?, detail: String)
+
         var errorDescription: String? {
             switch self {
             case .unexpected(let s): return s
             case .http(let code, let body):
                 return "Graph HTTP \(code): \(MicrosoftGraphMailService.summarizeGraphErrorBody(body))"
             case .timedOut(let s): return s
+            case .throttled(let retryAfter, let detail):
+                let summary = MicrosoftGraphMailService.summarizeGraphErrorBody(detail)
+                if let retryAfter, retryAfter > 0 {
+                    return "Graph HTTP 429: \(summary) (Retry-After \(Int(ceil(retryAfter)))s)"
+                }
+                return "Graph HTTP 429: \(summary)"
+            }
+        }
+
+        var isThrottled: Bool {
+            switch self {
+            case .throttled:
+                return true
+            case .http(let code, let body):
+                return code == 429
+                    || body.localizedCaseInsensitiveContains("throttl")
+                    || body.localizedCaseInsensitiveContains("IncomingBytes")
+                    || body.localizedCaseInsensitiveContains("ApplicationThrottled")
+            default:
+                return false
             }
         }
     }
