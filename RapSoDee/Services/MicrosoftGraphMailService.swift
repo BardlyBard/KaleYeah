@@ -3,8 +3,9 @@ import Foundation
 /// Microsoft Graph mail sync / send for Microsoft 365 (modern auth).
 enum MicrosoftGraphMailService {
     private static let graphRoot = "https://graph.microsoft.com/v1.0"
-    /// Keep list sync small — full HTML bodies were hanging Kale Yeah sync past 60s.
-    private static let listLimit = 20
+    /// Cap for lightweight list sync — matches MailMessageCache.maxCachedMessages.
+    /// Full HTML bodies are NOT fetched here (bodies load on open); pagination follows @odata.nextLink.
+    private static let listLimit = 200
 
     /// Bounded Graph HTTP — short timeouts so Cancel / Settings never sit forever.
     /// Do NOT call invalidateAndCancel from UI cancel (can race and crash); rely on Task cancellation.
@@ -793,14 +794,19 @@ enum MicrosoftGraphMailService {
     ) async throws -> [MailMessage] {
         struct GraphList: Decodable {
             var value: [GraphMessage]?
+            var nextLink: String?
+
+            enum CodingKeys: String, CodingKey {
+                case value
+                case nextLink = "@odata.nextLink"
+            }
         }
         // Lightweight list only — no `body` (HTML payloads hung sync). Bodies load on open.
         let select = "id,internetMessageId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,isRead,flag,hasAttachments"
         // Sent Items sorts more reliably by sentDateTime; Inbox by receivedDateTime.
         let orderby = folderPath.contains("sentitems") ? "sentDateTime desc" : "receivedDateTime desc"
-        let list: GraphList = try await getJSON(
+        var nextURL: URL? = try makeURL(
             path: folderPath,
-            accessToken: accessToken,
             query: [
                 "$top": "\(listLimit)",
                 "$orderby": orderby,
@@ -809,37 +815,52 @@ enum MicrosoftGraphMailService {
         )
 
         var out: [MailMessage] = []
-        for gm in list.value ?? [] {
-            guard let graphID = gm.id, !graphID.isEmpty else { continue }
-            let id = stableMessageID(graphID: graphID)
-            var attachments: [MailAttachment] = []
-            if gm.hasAttachments == true {
-                // Do not call Graph /attachments during list sync — N extra round-trips
-                // (and contentBytes) blew the Office365 timeout and left Kale Yeah empty.
-                // Stub keeps the "Has attachments" filter working; full bodies load on open.
-                attachments = [
-                    MailAttachment(
-                        id: UUID(),
-                        filename: "Attachment",
-                        mimeType: "application/octet-stream",
-                        byteSize: 0,
-                        localPath: nil,
-                        remoteID: nil
+        while let url = nextURL, out.count < listLimit {
+            try Task.checkCancellation()
+            let list: GraphList = try await getJSON(url: url, accessToken: accessToken)
+            for gm in list.value ?? [] {
+                guard let graphID = gm.id, !graphID.isEmpty else { continue }
+                let id = stableMessageID(graphID: graphID)
+                var attachments: [MailAttachment] = []
+                if gm.hasAttachments == true {
+                    // Do not call Graph /attachments during list sync — N extra round-trips
+                    // (and contentBytes) blew the Office365 timeout and left Kale Yeah empty.
+                    // Stub keeps the "Has attachments" filter working; full bodies load on open.
+                    attachments = [
+                        MailAttachment(
+                            id: UUID(),
+                            filename: "Attachment",
+                            mimeType: "application/octet-stream",
+                            byteSize: 0,
+                            localPath: nil,
+                            remoteID: nil
+                        )
+                    ]
+                }
+                out.append(
+                    mapMessage(
+                        gm,
+                        accountID: accountID,
+                        folderID: folderID,
+                        accountEmail: accountEmail,
+                        isDraft: isDraft,
+                        messageID: id,
+                        remoteID: graphID,
+                        attachments: attachments
                     )
-                ]
-            }
-            out.append(
-                mapMessage(
-                    gm,
-                    accountID: accountID,
-                    folderID: folderID,
-                    accountEmail: accountEmail,
-                    isDraft: isDraft,
-                    messageID: id,
-                    remoteID: graphID,
-                    attachments: attachments
                 )
-            )
+                if out.count >= listLimit { break }
+            }
+            if out.count >= listLimit {
+                break
+            }
+            if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !link.isEmpty,
+               let parsed = URL(string: link) {
+                nextURL = parsed
+            } else {
+                nextURL = nil
+            }
         }
         return out
     }
@@ -978,7 +999,11 @@ enum MicrosoftGraphMailService {
     }
 
     private static func getJSON<T: Decodable>(path: String, accessToken: String, query: [String: String] = [:]) async throws -> T {
-        let url = try makeURL(path: path, query: query)
+        try await getJSON(url: try makeURL(path: path, query: query), accessToken: accessToken)
+    }
+
+    /// Absolute-URL GET (path-based queries and Graph `@odata.nextLink` pages).
+    private static func getJSON<T: Decodable>(url: URL, accessToken: String) async throws -> T {
         var request = URLRequest(url: url, timeoutInterval: 25)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")

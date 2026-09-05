@@ -65,7 +65,7 @@ enum MailIMAPProvider: String, Codable, CaseIterable, Hashable {
         }
     }
 
-    var recentLimit: Int { 50 }
+    var recentLimit: Int { 200 }
 
     var passwordPrompt: String {
         switch self {
@@ -82,7 +82,7 @@ enum MailIMAPProvider: String, Codable, CaseIterable, Hashable {
 }
 
 enum ProviderAccountDefaults {
-    static let recentLimit = 50
+    static let recentLimit = 200
 }
 
 struct IMAPFolderIDs: Sendable {
