@@ -17,6 +17,16 @@ enum MicrosoftGraphMailService {
         return URLSession(configuration: config)
     }()
 
+    /// Longer timeouts for EML import (MIME / attachments).
+    private static let importSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 90
+        config.timeoutIntervalForResource = 120
+        config.waitsForConnectivity = false
+        config.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: config)
+    }()
+
     struct GraphSyncResult {
         var foldersFetched: Int
         var messagesFetched: Int
@@ -435,6 +445,339 @@ enum MicrosoftGraphMailService {
         let more = to.count > 3 ? " +\(to.count - 3)" : ""
         let att = attachmentCount > 0 ? ", \(attachmentCount) attachment(s)" : ""
         return "Sent via Graph (\(path)) as \(mailbox) → \(toPreview)\(more)\(att)"
+    }
+
+
+    // MARK: - EML import
+
+    /// True when a message with this `internetMessageId` already exists in the mailbox.
+    static func messageExists(accessToken: String, internetMessageId: String) async throws -> Bool {
+        let mid = internetMessageId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mid.isEmpty else { return false }
+        // OData string literal: escape single quotes by doubling.
+        let escaped = mid.replacingOccurrences(of: "'", with: "''")
+        struct GraphList: Decodable { var value: [GraphIDOnly]? }
+        struct GraphIDOnly: Decodable { var id: String? }
+        let list: GraphList = try await getJSON(
+            path: "/me/messages",
+            accessToken: accessToken,
+            query: [
+                "$filter": "internetMessageId eq '\(escaped)'",
+                "$select": "id",
+                "$top": "1",
+            ]
+        )
+        return (list.value?.isEmpty == false)
+    }
+
+    /// Import one parsed EML into a mail folder.
+    /// Prefers Graph MIME create (base64 RFC822) when the folder endpoint accepts it; otherwise
+    /// falls back to JSON message create. Uses `singleValueExtendedProperties` Integer 0x0E07=4
+    /// so the item is not left as a draft (Graph create defaults to isDraft=true).
+    @discardableResult
+    static func importEML(
+        accessToken: String,
+        folderID: String,
+        parsed: ParsedEML
+    ) async throws -> String {
+        let folder = folderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folder.isEmpty else { throw GraphError.unexpected("Missing destination folder") }
+
+        // 1) Prefer MIME → draft on /me/messages, then re-create in folder as non-draft JSON.
+        // Folder MIME create often returns UnableToDeserializePostBody; /me/messages MIME works.
+        do {
+            let draftID = try await createMIMEDraft(accessToken: accessToken, mimeData: parsed.rawMIME)
+            do {
+                let createdID = try await recreateDraftAsNonDraftInFolder(
+                    accessToken: accessToken,
+                    draftID: draftID,
+                    folderID: folder,
+                    parsed: parsed
+                )
+                try? await deleteHTTP(
+                    path: "/me/messages/\(draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID)",
+                    accessToken: accessToken
+                )
+                return createdID
+            } catch {
+                // Clean up orphan draft, then fall through to JSON parse path.
+                try? await deleteHTTP(
+                    path: "/me/messages/\(draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID)",
+                    accessToken: accessToken
+                )
+                throw error
+            }
+        } catch {
+            // MIME path unavailable — parse-based JSON create.
+            return try await createParsedMessageInFolder(
+                accessToken: accessToken,
+                folderID: folder,
+                parsed: parsed
+            )
+        }
+    }
+
+    private static func createMIMEDraft(accessToken: String, mimeData: Data) async throws -> String {
+        let url = try makeURL(path: "/me/messages", query: [:])
+        var request = URLRequest(url: url, timeoutInterval: 120)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("IdType=\"ImmutableId\"", forHTTPHeaderField: "Prefer")
+        // Graph MIME create expects the entire RFC822 payload base64-encoded as the body.
+        request.httpBody = mimeData.base64EncodedString().data(using: .utf8)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await importSession.data(for: request)
+        } catch {
+            throw mapSessionError(error)
+        }
+        try throwIfNeeded(response: response, data: data)
+        struct Created: Decodable { var id: String? }
+        let created = try JSONDecoder().decode(Created.self, from: data)
+        guard let id = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+            throw GraphError.unexpected("MIME create returned no message id")
+        }
+        return id
+    }
+
+    private static func recreateDraftAsNonDraftInFolder(
+        accessToken: String,
+        draftID: String,
+        folderID: String,
+        parsed: ParsedEML
+    ) async throws -> String {
+        let encoded = draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID
+        // Fetch draft fields Graph already parsed from MIME.
+        struct DraftDetail: Decodable {
+            var subject: String?
+            var body: GraphBody?
+            var from: GraphRecipient?
+            var toRecipients: [GraphRecipient]?
+            var ccRecipients: [GraphRecipient]?
+            var internetMessageId: String?
+            var isRead: Bool?
+            var hasAttachments: Bool?
+        }
+        let detail: DraftDetail = try await getJSON(
+            path: "/me/messages/\(encoded)",
+            accessToken: accessToken,
+            query: [
+                "$select": "id,subject,body,from,toRecipients,ccRecipients,internetMessageId,isRead,hasAttachments,receivedDateTime,sentDateTime",
+            ]
+        )
+
+        var message = graphJSONMessage(
+            subject: detail.subject ?? parsed.subject,
+            bodyContent: detail.body?.content ?? parsed.body,
+            bodyIsHTML: (detail.body?.contentType ?? "").lowercased() == "html" || parsed.isHTML,
+            fromName: detail.from?.emailAddress?.name ?? parsed.fromName,
+            fromAddress: detail.from?.emailAddress?.address ?? parsed.fromAddress,
+            to: mapRecipients(detail.toRecipients) ?? parsed.to,
+            cc: mapRecipients(detail.ccRecipients) ?? parsed.cc,
+            internetMessageId: detail.internetMessageId ?? parsed.internetMessageId,
+            received: parsed.receivedDate,
+            sent: parsed.sentDate,
+            isRead: detail.isRead ?? parsed.isRead,
+            undraft: true
+        )
+
+        // Attachments from the draft (with bytes) when present; else from parsed EML.
+        var attachments: [[String: Any]] = []
+        if detail.hasAttachments == true {
+            attachments = try await fetchDraftFileAttachmentPayloads(draftID: draftID, accessToken: accessToken)
+        }
+        if attachments.isEmpty {
+            attachments = fileAttachmentPayloads(from: parsed.attachments)
+        }
+        if !attachments.isEmpty {
+            message["attachments"] = attachments
+        }
+
+        let folderEnc = folderID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? folderID
+        let createdData = try await postJSONImport(
+            path: "/me/mailFolders/\(folderEnc)/messages",
+            accessToken: accessToken,
+            body: message
+        )
+        struct Created: Decodable { var id: String? }
+        let created = try JSONDecoder().decode(Created.self, from: createdData)
+        guard let id = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+            throw GraphError.unexpected("Folder create returned no message id")
+        }
+        return id
+    }
+
+    private static func createParsedMessageInFolder(
+        accessToken: String,
+        folderID: String,
+        parsed: ParsedEML
+    ) async throws -> String {
+        var message = graphJSONMessage(
+            subject: parsed.subject,
+            bodyContent: parsed.body,
+            bodyIsHTML: parsed.isHTML,
+            fromName: parsed.fromName,
+            fromAddress: parsed.fromAddress,
+            to: parsed.to,
+            cc: parsed.cc,
+            internetMessageId: parsed.internetMessageId,
+            received: parsed.receivedDate,
+            sent: parsed.sentDate,
+            isRead: parsed.isRead,
+            undraft: true
+        )
+        let attachments = fileAttachmentPayloads(from: parsed.attachments)
+        if !attachments.isEmpty {
+            message["attachments"] = attachments
+        }
+        let folderEnc = folderID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? folderID
+        let createdData = try await postJSONImport(
+            path: "/me/mailFolders/\(folderEnc)/messages",
+            accessToken: accessToken,
+            body: message
+        )
+        struct Created: Decodable { var id: String? }
+        let created = try JSONDecoder().decode(Created.self, from: createdData)
+        guard let id = created.id?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+            throw GraphError.unexpected("JSON import returned no message id")
+        }
+        return id
+    }
+
+    private static func graphJSONMessage(
+        subject: String,
+        bodyContent: String,
+        bodyIsHTML: Bool,
+        fromName: String?,
+        fromAddress: String?,
+        to: [(name: String?, address: String)],
+        cc: [(name: String?, address: String)],
+        internetMessageId: String?,
+        received: Date?,
+        sent: Date?,
+        isRead: Bool,
+        undraft: Bool
+    ) -> [String: Any] {
+        var message: [String: Any] = [
+            "subject": subject,
+            "body": [
+                "contentType": bodyIsHTML ? "HTML" : "Text",
+                "content": bodyContent,
+            ],
+            "toRecipients": recipientObjectsNamed(to),
+            "ccRecipients": recipientObjectsNamed(cc),
+            "isRead": isRead,
+        ]
+        if let fromAddress, !fromAddress.isEmpty {
+            var email: [String: String] = ["address": fromAddress]
+            if let fromName, !fromName.isEmpty { email["name"] = fromName }
+            message["from"] = ["emailAddress": email]
+            message["sender"] = ["emailAddress": email]
+        }
+        if let internetMessageId, !internetMessageId.isEmpty {
+            message["internetMessageId"] = internetMessageId
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        if let received {
+            message["receivedDateTime"] = iso.string(from: received)
+        }
+        if let sent {
+            message["sentDateTime"] = iso.string(from: sent)
+        }
+        if undraft {
+            // PidTagMessageFlags — clear draft so OWA/Outlook treat it as received mail.
+            message["singleValueExtendedProperties"] = [
+                ["id": "Integer 0x0E07", "value": "4"]
+            ]
+        }
+        return message
+    }
+
+    private static func recipientObjectsNamed(_ addresses: [(name: String?, address: String)]) -> [[String: Any]] {
+        addresses.map { pair in
+            var email: [String: String] = ["address": pair.address]
+            if let name = pair.name, !name.isEmpty { email["name"] = name }
+            return ["emailAddress": email]
+        }
+    }
+
+    private static func mapRecipients(_ list: [GraphRecipient]?) -> [(name: String?, address: String)]? {
+        guard let list, !list.isEmpty else { return nil }
+        let mapped: [(name: String?, address: String)] = list.compactMap { r in
+            guard let addr = r.emailAddress?.address, !addr.isEmpty else { return nil }
+            return (r.emailAddress?.name, addr)
+        }
+        return mapped.isEmpty ? nil : mapped
+    }
+
+    /// Inline fileAttachment payloads; skip anything over ~2.5 MB (Graph inline limit ~3 MB).
+    private static func fileAttachmentPayloads(from attachments: [ParsedMailAttachment]) -> [[String: Any]] {
+        let limit = 2_500_000
+        var out: [[String: Any]] = []
+        for att in attachments {
+            guard att.data.count <= limit, !att.data.isEmpty else { continue }
+            out.append([
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": att.filename,
+                "contentType": att.mimeType.isEmpty ? "application/octet-stream" : att.mimeType,
+                "contentBytes": att.data.base64EncodedString(),
+            ])
+        }
+        return out
+    }
+
+    private static func fetchDraftFileAttachmentPayloads(draftID: String, accessToken: String) async throws -> [[String: Any]] {
+        struct GraphAttachmentList: Decodable { var value: [GraphAttachment]? }
+        let encoded = draftID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? draftID
+        let list: GraphAttachmentList = try await getJSON(
+            path: "/me/messages/\(encoded)/attachments",
+            accessToken: accessToken,
+            query: [:]
+        )
+        let limit = 2_500_000
+        var out: [[String: Any]] = []
+        for item in list.value ?? [] {
+            let typeName = (item.odataType ?? "").lowercased()
+            guard typeName.contains("fileattachment") else { continue }
+            guard let b64 = item.contentBytes, !b64.isEmpty,
+                  let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]),
+                  data.count <= limit else { continue }
+            let filename = (item.name ?? "attachment").trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append([
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": filename.isEmpty ? "attachment" : filename,
+                "contentType": item.contentType ?? "application/octet-stream",
+                "contentBytes": data.base64EncodedString(),
+            ])
+        }
+        return out
+    }
+
+    @discardableResult
+    private static func postJSONImport(path: String, accessToken: String, body: [String: Any]) async throws -> Data {
+        let url = try makeURL(path: path, query: [:])
+        var request = URLRequest(url: url, timeoutInterval: 120)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("IdType=\"ImmutableId\"", forHTTPHeaderField: "Prefer")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await importSession.data(for: request)
+        } catch {
+            throw mapSessionError(error)
+        }
+        try throwIfNeeded(response: response, data: data)
+        return data
     }
 
     // MARK: - Internals

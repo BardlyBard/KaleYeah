@@ -22,6 +22,8 @@ struct SettingsView: View {
     @State private var msalTenantID = MSALAppConfig.tenantID
     @State private var deviceCodePrompt: MSALDeviceCodePrompt?
     @State private var preferSMTPSend = MSALAppConfig.preferSMTPSend
+    @State private var emlDestination: EMLImportDestination = .inbox
+    @State private var emlCustomFolderID = ""
 
     var body: some View {
         NavigationStack {
@@ -180,6 +182,81 @@ struct SettingsView: View {
                     Text("Default: Graph create-draft → send (closer to Outlook). On Graph failure, RapSoDee auto-falls back to SMTP. Prefer SMTP tries XOAUTH2 first; if silent SMTP.Send token fails, it falls back to Graph so send is never a silent no-op. NDRs like 550 5.7.708 are not visible in-app.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    Group {
+                        Text("Import Zoho / backup .eml into this Microsoft 365 mailbox (Graph). Not for PST.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker("Destination folder", selection: $emlDestination) {
+                            ForEach(EMLImportDestination.allCases) { dest in
+                                Text(dest.title).tag(dest)
+                            }
+                        }
+                        if emlDestination == .custom {
+                            TextField("Graph mailFolder id", text: $emlCustomFolderID)
+                                .font(.system(.body, design: .monospaced))
+                        }
+                        HStack(spacing: 10) {
+                            Button("Import EML…") {
+                                Task {
+                                    office365Busy = true
+                                    defer { office365Busy = false }
+                                    await store.importEMLIntoMicrosoft365(
+                                        destination: emlDestination,
+                                        customFolderID: emlCustomFolderID
+                                    ) { prompt in
+                                        deviceCodePrompt = prompt
+                                        store.office365SyncStatus = "Enter code \(prompt.userCode) at \(prompt.verificationURL.host ?? "microsoft.com/devicelogin")"
+                                    }
+                                    deviceCodePrompt = nil
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(
+                                office365Busy
+                                    || store.office365IsSyncing
+                                    || store.emlImportIsRunning
+                                    || (store.office365Account() == nil && !MSALAuthService.shared.isSignedIn)
+                            )
+                            if store.emlImportIsRunning {
+                                Button("Cancel import") {
+                                    store.cancelEMLImport()
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.orange)
+                            }
+                        }
+                        if let prog = store.emlImportProgress {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(prog.statusLine)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                if prog.total > 0 {
+                                    ProgressView(value: Double(prog.completed), total: Double(max(prog.total, 1)))
+                                }
+                                if !prog.failures.isEmpty {
+                                    Text("Failures:")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.red)
+                                    ForEach(Array(prog.failures.prefix(8).enumerated()), id: \.offset) { _, fail in
+                                        Text("• \(fail.file): \(fail.reason)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.red)
+                                            .textSelection(.enabled)
+                                    }
+                                    if prog.failures.count > 8 {
+                                        Text("…and \(prog.failures.count - 8) more")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(MuseTheme.paper.opacity(0.8))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
 
                     HStack(spacing: 10) {
                         Button("Sign in with Microsoft") {

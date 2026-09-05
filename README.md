@@ -124,6 +124,23 @@ RapSoDee uses MSAL **ASWebAuthenticationSession** (`webviewType = .authenticatio
 4. If Safari still shows a blank “you can close this” page, click back to RapSoDee once. If Settings says *Only one interactive session is allowed at a time*, tap **Clear stuck sign-in** / **Cancel sign-in / sync**, then Sign in again (RapSoDee cancels the orphan session and retries once automatically).
 5. **If the browser still hangs after Allow:** use **Sign in with device code** in Settings. RapSoDee shows a copyable user code + `https://microsoft.com/devicelogin` (no app redirect). Enter the code in any browser; RapSoDee polls until signed in. (Implemented via OAuth device authorization grant — MSAL ObjC has no `acquireTokenWithDeviceCode` API.)
 
+
+## Import EML (Zoho / backup → Microsoft 365)
+
+Import `.eml` files into the signed-in Kale Yeah Microsoft 365 mailbox via Microsoft Graph so **OWA, RapSoDee, and Outlook** all see the mail. This is **not** PST import.
+
+1. Sign in to Microsoft 365 in **Settings → Accounts — Microsoft 365** (silent token; use **Sign in with device code** if expired).
+2. Choose destination: **Inbox** (default), **Archive**, or a custom Graph `mailFolder` id.
+3. Click **Import EML…** (also **File → Import EML…** / ⇧⌘I).
+4. In the open panel, select a **folder** of `.eml` files and/or individual `.eml` files (recursive).
+5. Watch progress (`N/M imported`); failures are listed; duplicates with the same `Message-ID` are skipped.
+6. When finished, RapSoDee runs **Sync** so the message list refreshes.
+
+Notes:
+- Prefers Graph MIME create (RFC822), then falls back to parsed JSON (`subject`, body, from/to/cc, dates, attachments).
+- Dates are preserved when Graph accepts `receivedDateTime` / `sentDateTime` on create.
+- Never commit `.eml` contents or tokens (see `.gitignore`).
+
 ## Project layout
 
 ```
@@ -161,7 +178,7 @@ project.yml                  # XcodeGen spec
 
 ## Design notes
 
-- Follows **system appearance** (light/dark).
+- Permanent **light mode** (aqua); dark Muse theming stays disabled.
 - Soft per-account row tints; Approve uses a loud but friendly accent; live Gmail uses Google-red tint; Microsoft 365 uses Outlook-blue tint.
 - `MailStore` is the seam for backends — Stage 1 ships `DemoMailStore` with optional Gmail IMAP/SMTP + Microsoft 365 MSAL/Graph.
 

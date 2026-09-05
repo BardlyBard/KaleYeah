@@ -4,6 +4,10 @@ struct RapKeyboardCommands: Commands {
     @FocusedValue(\.rapActions) private var actions
 
     var body: some Commands {
+        CommandGroup(after: .importExport) {
+            Button("Import EML…") { actions?.importEML() }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+        }
         CommandMenu("Message") {
             Button("Archive") { actions?.archive() }
                 .keyboardShortcut("e", modifiers: [.command])

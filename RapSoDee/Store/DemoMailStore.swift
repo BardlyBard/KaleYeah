@@ -32,6 +32,9 @@ final class DemoMailStore: MailStore {
     var office365SyncStartedAt: Date?
     var office365NeedsSetup: Bool = true
     var office365LastError: String?
+    var emlImportProgress: EMLImportProgress?
+    var emlImportIsRunning: Bool = false
+    private var emlImportTask: Task<Void, Never>?
     /// Overall Graph sync budget (silent token + lightweight inbox/sent list).
     private static let office365SyncTimeoutSeconds: TimeInterval = 45
     /// Silent token acquire must fail fast — never hang Settings on interactive auth during Sync.
@@ -1451,6 +1454,125 @@ final class DemoMailStore: MailStore {
                 }
             }
         }
+    }
+
+
+    // MARK: - EML import (Microsoft 365)
+
+    func cancelEMLImport() {
+        emlImportTask?.cancel()
+        emlImportTask = nil
+        emlImportIsRunning = false
+        if var p = emlImportProgress {
+            p.statusLine = "Cancelled — \(p.imported)/\(p.total) imported"
+            emlImportProgress = p
+        }
+        office365SyncStatus = emlImportProgress?.statusLine ?? "EML import cancelled"
+    }
+
+    /// Pick sources via NSOpenPanel, import into Graph folder, then Sync.
+    /// Uses silent token; on expiry runs device-code via `onDeviceCodePrompt`.
+    func importEMLIntoMicrosoft365(
+        destination: EMLImportDestination = .inbox,
+        customFolderID: String? = nil,
+        onDeviceCodePrompt: (@MainActor (MSALDeviceCodePrompt) -> Void)? = nil
+    ) async {
+        if emlImportIsRunning { return }
+        guard let urls = EMLImportService.pickEMLSources(), !urls.isEmpty else {
+            office365SyncStatus = "EML import cancelled"
+            return
+        }
+        let files = EMLImportService.collectEMLFiles(from: urls)
+        guard !files.isEmpty else {
+            office365SyncStatus = "No .eml files found in selection"
+            office365LastError = "Select a folder containing .eml files, or individual .eml files."
+            return
+        }
+
+        let folderID: String
+        if destination == .custom {
+            let custom = (customFolderID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !custom.isEmpty else {
+                office365LastError = "Enter a Graph mailFolder id for Custom destination."
+                return
+            }
+            folderID = custom
+        } else {
+            folderID = destination.wellKnownName ?? "inbox"
+        }
+
+        emlImportIsRunning = true
+        emlImportProgress = .empty(total: files.count)
+        office365LastError = nil
+        office365SyncStatus = "Importing \(files.count) EML file(s) into \(destination.title)…"
+
+        let work = Task { @MainActor in
+            defer {
+                self.emlImportIsRunning = false
+                self.emlImportTask = nil
+            }
+            do {
+                var token: String
+                do {
+                    token = try await MSALAuthService.shared.acquireAccessToken(
+                        interactiveIfNeeded: false,
+                        loginHint: Office365Defaults.defaultEmail
+                    )
+                } catch {
+                    guard let onPrompt = onDeviceCodePrompt else { throw error }
+                    self.office365SyncStatus = "Sign-in expired — starting device code for EML import…"
+                    token = try await MSALAuthService.shared.signInWithDeviceCode(
+                        loginHint: Office365Defaults.defaultEmail,
+                        onPrompt: onPrompt
+                    )
+                }
+                try Task.checkCancellation()
+
+                let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+                _ = self.ensureOffice365Account(email: email)
+
+                let progress = await EMLImportService.importFiles(
+                    files,
+                    accessToken: token,
+                    destinationFolderID: folderID
+                ) { prog in
+                    self.emlImportProgress = prog
+                    self.office365SyncStatus = prog.statusLine
+                }
+                self.emlImportProgress = progress
+                self.office365SyncStatus = progress.statusLine
+                if !progress.failures.isEmpty {
+                    let preview = progress.failures.prefix(3).map { "\($0.file): \($0.reason)" }.joined(separator: " | ")
+                    self.office365LastError = preview
+                } else {
+                    self.office365LastError = nil
+                }
+
+                // Refresh RapSoDee list from Graph so imported mail appears.
+                if progress.imported > 0 || progress.skippedDuplicates > 0 {
+                    await self.syncOffice365Now()
+                    if self.office365SyncStatus.localizedCaseInsensitiveContains("synced") {
+                        self.office365SyncStatus = "\(progress.statusLine) — \(self.office365SyncStatus)"
+                    }
+                }
+            } catch is CancellationError {
+                self.office365SyncStatus = "EML import cancelled"
+            } catch {
+                if Self.isCancelLike(error) {
+                    self.office365SyncStatus = "EML import cancelled"
+                    return
+                }
+                let detail = error.localizedDescription
+                self.office365LastError = detail
+                self.office365SyncStatus = "EML import failed — \(String(detail.prefix(200)))"
+                if Self.isSilentAuthFailure(error) {
+                    self.office365NeedsSetup = true
+                    self.office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code, then Import EML again"
+                }
+            }
+        }
+        emlImportTask = work
+        await work.value
     }
 
     /// Load full Graph body when opening a Kale Yeah message (list sync uses bodyPreview only).

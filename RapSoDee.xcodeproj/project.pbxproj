@@ -8,12 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CF19AB988772E0D1F5BAF7C /* ComposeView.swift */; };
+		175EF7D9432B73593D1FC90A /* EMLFileParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB5576A2D321340B581AB4B /* EMLFileParser.swift */; };
 		17F086AFBF89DC7289FD7ED5 /* SimpleIMAPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */; };
 		18484EB4A3C04EB7044D63CC /* FlagMenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11F578DAC374C39E9BB29BE1 /* FlagMenuContent.swift */; };
 		2A1E9321BABD97AD78548B6D /* MailTLSConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFBCCB2127B4E1CE2B7084B /* MailTLSConnection.swift */; };
 		2E38EDF0247122E10ED00B41 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 011476096BD250F13FF78C8F /* SettingsView.swift */; };
 		2F5F3BA69B8E8E112432CCBB /* MicrosoftGraphMailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDAA6E648E7E3A19E87EF95 /* MicrosoftGraphMailService.swift */; };
 		407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36684E996FD0A65878AA7714 /* FilePickerSheet.swift */; };
+		44D55BDEBDDCA28F3D9F4426 /* EMLImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AEDE84CFAA0DDEA77C9C249 /* EMLImportService.swift */; };
 		557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */; };
 		5D3F06ABDEFE35BF6996AA4F /* SettingsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */; };
 		652C516C3580100CDF36E4FA /* MSALAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A8A1692C6D3CC0BE8528C9E /* MSALAuthService.swift */; };
@@ -69,6 +71,7 @@
 		7EFBCCB2127B4E1CE2B7084B /* MailTLSConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailTLSConnection.swift; sourceTree = "<group>"; };
 		8B5DF663D1DAB5115A266044 /* MuseTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MuseTheme.swift; sourceTree = "<group>"; };
 		9AD842DE4FE5AE47AC915034 /* AttachmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStore.swift; sourceTree = "<group>"; };
+		9AEDE84CFAA0DDEA77C9C249 /* EMLImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EMLImportService.swift; sourceTree = "<group>"; };
 		9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
 		A0580DD670292BF6A5A9A8C8 /* RapSoDeeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RapSoDeeApp.swift; sourceTree = "<group>"; };
 		A4605E49DCDE9B499093CE4D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -77,6 +80,7 @@
 		B384989846962FDE099FEC67 /* RapSoDee.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RapSoDee.entitlements; sourceTree = "<group>"; };
 		BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailDisplayNames.swift; sourceTree = "<group>"; };
 		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
+		CAB5576A2D321340B581AB4B /* EMLFileParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EMLFileParser.swift; sourceTree = "<group>"; };
 		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleIMAPClient.swift; sourceTree = "<group>"; };
 		DDD343817DC7561DB08A98E3 /* MacSecureField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSecureField.swift; sourceTree = "<group>"; };
@@ -196,6 +200,8 @@
 			isa = PBXGroup;
 			children = (
 				9AD842DE4FE5AE47AC915034 /* AttachmentStore.swift */,
+				CAB5576A2D321340B581AB4B /* EMLFileParser.swift */,
+				9AEDE84CFAA0DDEA77C9C249 /* EMLImportService.swift */,
 				2EB951F80DA297C00D44E728 /* GmailSyncService.swift */,
 				684D7DD0B3944251C3A03C0B /* IMAPAccountSyncService.swift */,
 				2D824C655A6789480B722FF9 /* KeychainCredentialStore.swift */,
@@ -295,6 +301,8 @@
 				068A14BEA8695CEBE5E47D42 /* ComposeView.swift in Sources */,
 				CD80E90A36403943257098A6 /* ContentView.swift in Sources */,
 				84749A185DB597F106310035 /* DemoMailStore.swift in Sources */,
+				175EF7D9432B73593D1FC90A /* EMLFileParser.swift in Sources */,
+				44D55BDEBDDCA28F3D9F4426 /* EMLImportService.swift in Sources */,
 				407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */,
 				18484EB4A3C04EB7044D63CC /* FlagMenuContent.swift in Sources */,
 				F9F39F4348160FE98CF3C892 /* GmailSyncService.swift in Sources */,

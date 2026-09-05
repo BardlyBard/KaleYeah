@@ -29,3 +29,7 @@ xcuserdata/
 
 # Local build
 .derivedData/
+
+# Never commit email dumps / EML backups
+*.eml
+*.EML

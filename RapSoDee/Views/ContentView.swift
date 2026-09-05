@@ -162,7 +162,19 @@ struct ContentView: View {
             file: { if let m = selectedMessage { fileTarget = m } },
             snooze: { if let m = selectedMessage { snoozeTarget = m } },
             next: { moveSelection(1) },
-            prev: { moveSelection(-1) }
+            prev: { moveSelection(-1) },
+            importEML: {
+                // Prefer Settings UI (destination picker + progress); File menu still starts import to Inbox.
+                if store.office365Account() == nil && !MSALAuthService.shared.isSignedIn {
+                    showSettings = true
+                    return
+                }
+                Task {
+                    await store.importEMLIntoMicrosoft365(destination: .inbox, customFolderID: nil) { _ in
+                        showSettings = true
+                    }
+                }
+            }
         ))
     }
 
@@ -397,6 +409,7 @@ struct RapActions {
     var snooze: () -> Void
     var next: () -> Void
     var prev: () -> Void
+    var importEML: () -> Void
 }
 
 private struct RapActionsKey: FocusedValueKey {
