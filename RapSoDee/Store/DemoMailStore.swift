@@ -1839,29 +1839,50 @@ final class DemoMailStore: MailStore {
         await work.value
     }
 
-    /// Load full Graph body when opening a Kale Yeah message (list sync uses bodyPreview only).
+    /// Load full Graph body + real attachments when opening a Kale Yeah message.
+    /// List/delta sync only stores `bodyPreview` and attachment stubs (`filename == "Attachment"`).
     func ensureOffice365BodyLoaded(messageID: UUID) async {
         guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let message = messages[idx]
         guard let account = account(for: message.accountID), account.isLiveOffice365 else { return }
         guard let remoteID = message.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else { return }
-        if message.body.count > max(message.snippet.count + 40, 200) { return }
+        let needsBody = message.body.count <= max(message.snippet.count + 40, 200)
+        let needsAttachments = message.attachments.contains { !$0.hasLocalContent }
+        guard needsBody || needsAttachments else { return }
         let generation = office365SyncGeneration
         do {
             let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
                 try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: account.email)
             }
             guard generation == office365SyncGeneration else { return }
-            let loaded = try await MicrosoftGraphMailService.fetchMessageBody(accessToken: token, graphMessageID: remoteID)
-            guard generation == office365SyncGeneration else { return }
-            guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
-            messages[i].body = loaded.body
-            messages[i].isHTML = loaded.isHTML
-            MailMessageCache.saveLoadedBody(messageID: messageID, text: loaded.body, isHTML: loaded.isHTML)
+            if needsBody {
+                let loaded = try await MicrosoftGraphMailService.fetchMessageBody(accessToken: token, graphMessageID: remoteID)
+                guard generation == office365SyncGeneration else { return }
+                guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
+                messages[i].body = loaded.body
+                messages[i].isHTML = loaded.isHTML
+                MailMessageCache.saveLoadedBody(messageID: messageID, text: loaded.body, isHTML: loaded.isHTML)
+            }
+            if needsAttachments {
+                let atts = try await MicrosoftGraphMailService.fetchFileAttachments(
+                    messageGraphID: remoteID,
+                    accessToken: token,
+                    mailMessageID: messageID,
+                    includeBytes: true
+                )
+                guard generation == office365SyncGeneration else { return }
+                guard let i = messages.firstIndex(where: { $0.id == messageID }) else { return }
+                if !atts.isEmpty {
+                    messages[i].attachments = atts
+                } else if messages[i].attachments.allSatisfy({ $0.filename == "Attachment" && !$0.hasLocalContent }) {
+                    // Server reports no file attachments — clear stubs so the paperclip UI does not lie.
+                    messages[i].attachments = []
+                }
+            }
             persistMessageCache()
         } catch {
             if !Self.isCancelLike(error) {
-                NSLog("Office365 body fetch failed: \(error.localizedDescription)")
+                NSLog("Office365 open-message hydrate failed: \(error.localizedDescription)")
             }
         }
     }

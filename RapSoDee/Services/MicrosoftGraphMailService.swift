@@ -1079,14 +1079,40 @@ enum MicrosoftGraphMailService {
                 if let link = delta.deltaLink {
                     MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: link)
                 }
+                // Catch-up list: delta tokens can lag or miss creates. Merge a tiny recent
+                // window so Sync always surfaces brand-new Inbox/Sent mail (Organa→Kale case).
+                let catchUp: [MailMessage]
+                do {
+                    catchUp = try await listFolderMessagesWindow(
+                        folderPath: folderPath,
+                        accessToken: accessToken,
+                        accountID: accountID,
+                        folderID: folderID,
+                        accountEmail: accountEmail,
+                        mailboxKey: mailboxKey,
+                        isDraft: isDraft,
+                        limit: 25
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    catchUp = []
+                }
+                let merged = mergeMessagesByRemoteID(primary: delta.messages, extra: catchUp)
                 return FolderMessageSyncOutcome(
-                    messages: delta.messages,
+                    messages: merged,
                     removedRemoteIDs: delta.removedRemoteIDs,
                     allowsFolderReplace: false,
                     usedDelta: true,
-                    statusHint: "delta"
+                    statusHint: catchUp.isEmpty ? "delta" : "delta+catchup"
                 )
             } catch let error as GraphError where isDeltaTokenExpired(error) {
+                MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: nil)
+                // Fall through to hydrate + reseed.
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Non-expired delta failure: clear token and hydrate rather than skipping the folder.
                 MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: nil)
                 // Fall through to hydrate + reseed.
             }
@@ -1103,8 +1129,14 @@ enum MicrosoftGraphMailService {
             isDraft: isDraft
         )
         // Seed a "latest" delta token so the next Sync only pulls changes (no full re-list).
-        if let seeded = try? await seedLatestDeltaLink(folderPath: folderPath, accessToken: accessToken) {
+        // Fail-fast seed must never discard a successful hydrate; only rethrow cancellation.
+        do {
+            let seeded = try await seedLatestDeltaLink(folderPath: folderPath, accessToken: accessToken)
             MailMessageCache.updateGraphDeltaLink(accountID: accountID, mailboxKey: mailboxKey, deltaLink: seeded)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Keep hydrate results; next Sync stays on hydrate until seed succeeds.
         }
         // Hydrate is merge-only: never mark the folder prunable. A 200-window replace
         // was wiping the durable local index (and flashing the UI empty) on every Sync
@@ -1116,6 +1148,19 @@ enum MicrosoftGraphMailService {
             usedDelta: false,
             statusHint: "hydrate"
         )
+    }
+
+    /// Prefer `primary` rows; add any `extra` remotes not already present.
+    private static func mergeMessagesByRemoteID(primary: [MailMessage], extra: [MailMessage]) -> [MailMessage] {
+        var seen = Set(primary.compactMap { $0.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty })
+        var out = primary
+        for msg in extra {
+            let key = msg.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if key.isEmpty || seen.contains(key) { continue }
+            seen.insert(key)
+            out.append(msg)
+        }
+        return out
     }
 
     private static func isDeltaTokenExpired(_ error: GraphError) -> Bool {
@@ -1138,6 +1183,8 @@ enum MicrosoftGraphMailService {
     }
 
     /// `GET …/messages/delta?$deltatoken=latest` — empty change set + deltaLink when supported.
+    /// Fail fast: never crawl a full mailbox replay. A long seed was burning the Sync deadline
+    /// so Inbox/Sent results were discarded and new Graph mail never appeared in RapSoDee.
     private static func seedLatestDeltaLink(folderPath: String, accessToken: String) async throws -> String {
         let deltaPath = folderPath.hasSuffix("/messages")
             ? folderPath + "/delta"
@@ -1147,30 +1194,17 @@ enum MicrosoftGraphMailService {
         if let link = page.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
             return link
         }
-        // Some tenants ignore latest and return a full stream — follow until deltaLink, discard payloads.
-        var nextURL: URL? = nil
+        // At most one tiny preamble page — then give up and stay on hydrate-only.
         if let link = page.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
            !link.isEmpty,
            let parsed = URL(string: link) {
-            nextURL = parsed
-        }
-        var guardPages = 0
-        while let url = nextURL, guardPages < 40 {
-            guardPages += 1
             try Task.checkCancellation()
-            let list: GraphDeltaList = try await getJSON(url: url, accessToken: accessToken)
-            if let link = list.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
-                return link
-            }
-            if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !link.isEmpty,
-               let parsed = URL(string: link) {
-                nextURL = parsed
-            } else {
-                nextURL = nil
+            let list: GraphDeltaList = try await getJSON(url: parsed, accessToken: accessToken)
+            if let seeded = list.deltaLink?.trimmingCharacters(in: .whitespacesAndNewlines), !seeded.isEmpty {
+                return seeded
             }
         }
-        throw GraphError.unexpected("Graph delta seed returned no deltaLink")
+        throw GraphError.unexpected("Graph delta seed returned no deltaLink (fail-fast; will hydrate next Sync)")
     }
 
     private struct DeltaRunResult: Sendable {
@@ -1228,7 +1262,7 @@ enum MicrosoftGraphMailService {
         return DeltaRunResult(messages: out, removedRemoteIDs: removed, deltaLink: deltaLink)
     }
 
-    /// Classic recent-window list (hydrate). Soft-capped to `listLimit`.
+    /// Classic recent-window list (hydrate). Soft-capped to `limit` (default `listLimit`).
     private static func listFolderMessagesWindow(
         folderPath: String,
         accessToken: String,
@@ -1236,7 +1270,8 @@ enum MicrosoftGraphMailService {
         folderID: UUID,
         accountEmail: String,
         mailboxKey: String,
-        isDraft: Bool
+        isDraft: Bool,
+        limit: Int = listLimit
     ) async throws -> [MailMessage] {
         struct GraphList: Decodable {
             var value: [GraphMessage]?
@@ -1262,8 +1297,9 @@ enum MicrosoftGraphMailService {
             ]
         )
 
+        let softCap = max(1, limit)
         var out: [MailMessage] = []
-        while let url = nextURL, out.count < listLimit {
+        while let url = nextURL, out.count < softCap {
             try Task.checkCancellation()
             let list: GraphList = try await getJSON(url: url, accessToken: accessToken)
             for gm in list.value ?? [] {
@@ -1277,9 +1313,9 @@ enum MicrosoftGraphMailService {
                         isDraft: isDraft
                     )
                 )
-                if out.count >= listLimit { break }
+                if out.count >= softCap { break }
             }
-            if out.count >= listLimit {
+            if out.count >= softCap {
                 break
             }
             if let link = list.nextLink?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1328,7 +1364,8 @@ enum MicrosoftGraphMailService {
         )
     }
 
-    private static func fetchFileAttachments(
+    /// Public entry for open-message hydrate (list sync only stores attachment stubs).
+    static func fetchFileAttachments(
         messageGraphID: String,
         accessToken: String,
         mailMessageID: UUID,
@@ -1445,11 +1482,50 @@ enum MicrosoftGraphMailService {
     }
 
     private static func parseGraphDate(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = iso.date(from: raw) { return d }
+        if let d = iso.date(from: trimmed) { return d }
         iso.formatOptions = [.withInternetDateTime]
-        return iso.date(from: raw)
+        if let d = iso.date(from: trimmed) { return d }
+        // Graph frequently emits 7-digit fractional seconds (e.g. .1234567Z).
+        // Foundation's ISO8601DateFormatter only accepts milliseconds — without this,
+        // every listed message fell back to Date() (= sync clock) and sorting lied.
+        if let normalized = normalizeGraphFractionalSeconds(trimmed) {
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = iso.date(from: normalized) { return d }
+            iso.formatOptions = [.withInternetDateTime]
+            if let d = iso.date(from: normalized) { return d }
+        }
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in ["yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd'T'HH:mm:ssXXXXX"] {
+            df.dateFormat = format
+            if let d = df.date(from: trimmed) { return d }
+        }
+        return nil
+    }
+
+    /// Truncate fractional seconds to 3 digits so ISO8601DateFormatter can parse Graph timestamps.
+    private static func normalizeGraphFractionalSeconds(_ raw: String) -> String? {
+        guard let dot = raw.firstIndex(of: ".") else { return nil }
+        let head = raw[..<dot]
+        let afterDot = raw[raw.index(after: dot)...]
+        var fraction = ""
+        var tz = ""
+        for ch in afterDot {
+            if ch >= "0" && ch <= "9" {
+                fraction.append(ch)
+            } else {
+                tz = String(afterDot[afterDot.index(afterDot.startIndex, offsetBy: fraction.count)...])
+                break
+            }
+        }
+        guard !fraction.isEmpty else { return nil }
+        let millis = String(fraction.prefix(3)).padding(toLength: 3, withPad: "0", startingAt: 0)
+        return String(head) + "." + millis + tz
     }
 
     private static func makeURL(path: String, query: [String: String]) throws -> URL {
