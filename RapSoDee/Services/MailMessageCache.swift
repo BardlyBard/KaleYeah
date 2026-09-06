@@ -119,6 +119,22 @@ enum MailMessageCache {
                     snapshot.messages[i].isHTML = body.isHTML
                 }
             }
+            // Repair base64 / IMAP framing leaks left by older FETCH parsing.
+            let repaired = MimeBodyParser.repairStoredBody(
+                snapshot.messages[i].body,
+                isHTML: snapshot.messages[i].isHTML
+            )
+            if repaired.body != snapshot.messages[i].body || repaired.isHTML != snapshot.messages[i].isHTML {
+                snapshot.messages[i].body = repaired.body
+                snapshot.messages[i].isHTML = repaired.isHTML
+                if !repaired.body.isEmpty {
+                    saveBodySidecar(
+                        messageID: snapshot.messages[i].id,
+                        text: repaired.body,
+                        isHTML: repaired.isHTML
+                    )
+                }
+            }
         }
         return snapshot
     }

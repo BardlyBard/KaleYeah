@@ -22,7 +22,8 @@ struct MailboxLadderView: View {
                     title: "Inbox",
                     systemImage: "tray.full",
                     tag: .unifiedInbox,
-                    wash: Color.clear
+                    wash: Color.clear,
+                    unread: unreadCount(for: .unifiedInbox)
                 )
                 Label {
                     HStack {
@@ -48,7 +49,8 @@ struct MailboxLadderView: View {
                         title: "Snoozed",
                         systemImage: "moon.zzz",
                         tag: .folder(snoozed.id),
-                        wash: Color.clear
+                        wash: Color.clear,
+                        unread: unreadCount(for: .folder(snoozed.id))
                     )
                 }
             } header: {
@@ -73,7 +75,8 @@ struct MailboxLadderView: View {
                         title: "Junk",
                         systemImage: "xmark.bin",
                         tag: .folder(junk.id),
-                        wash: Color.clear
+                        wash: Color.clear,
+                        unread: unreadCount(for: .folder(junk.id))
                     )
                 } header: {
                     softSectionHeader("Later")
@@ -236,6 +239,7 @@ struct MailboxLadderView: View {
                                 .fontWeight(selected ? .semibold : .regular)
                                 .foregroundStyle(MuseTheme.ink)
                             Spacer(minLength: 0)
+                            unreadCountLabel(unreadCount(for: .folder(folder.id)))
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -358,11 +362,61 @@ struct MailboxLadderView: View {
     }
 
     @ViewBuilder
-    private func ladderRow(title: String, systemImage: String, tag: LadderSelection, wash: Color) -> some View {
-        Label(title, systemImage: systemImage)
-            .tag(tag)
-            .listRowBackground(mailboxWash(for: tag, base: wash))
+    private func ladderRow(title: String, systemImage: String, tag: LadderSelection, wash: Color, unread: Int = 0) -> some View {
+        Label {
+            HStack(spacing: 6) {
+                Text(title)
+                Spacer(minLength: 0)
+                unreadCountLabel(unread)
+            }
+        } icon: {
+            Image(systemName: systemImage)
+        }
+        .tag(tag)
+        .listRowBackground(mailboxWash(for: tag, base: wash))
     }
+
+    /// Calm muse unread mark — only when count > 0 (no zero badges).
+    @ViewBuilder
+    private func unreadCountLabel(_ count: Int) -> some View {
+        if count > 0 {
+            Text("\(count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(MuseTheme.ink.opacity(0.62))
+                .monospacedDigit()
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(MuseTheme.oatmeal.opacity(0.55), in: Capsule())
+                .accessibilityLabel("\(count) unread")
+        }
+    }
+
+    /// Unread for a ladder row. One Inbox = sum across accounts included in unified inbox.
+    private func unreadCount(for selection: LadderSelection) -> Int {
+        switch selection {
+        case .unifiedInbox:
+            let included = Set(store.accounts.filter(\.includeInUnifiedInbox).map(\.id))
+            let inboxIDs = Set(store.folders.filter {
+                $0.kind == .inbox && ($0.accountID.map(included.contains) ?? false)
+            }.map(\.id))
+            return store.messages.filter {
+                inboxIDs.contains($0.folderID) && !$0.isRead && $0.snoozeUntil == nil
+            }.count
+        case .approve:
+            return store.messages.filter { $0.disposition == .pendingApproval && !$0.isRead }.count
+        case .folder(let id):
+            if let folder = store.folder(for: id), folder.kind == .snoozed {
+                return store.messages.filter { $0.snoozeUntil != nil && !$0.isRead }.count
+            }
+            return store.messages.filter { $0.folderID == id && !$0.isRead && $0.snoozeUntil == nil }.count
+        case .accountInbox(let accountID):
+            let inboxIDs = Set(store.folders.filter { $0.kind == .inbox && $0.accountID == accountID }.map(\.id))
+            return store.messages.filter {
+                inboxIDs.contains($0.folderID) && !$0.isRead && $0.snoozeUntil == nil
+            }.count
+        }
+    }
+
 
     @ViewBuilder
     private func mailboxWash(for tag: LadderSelection, base: Color) -> some View {

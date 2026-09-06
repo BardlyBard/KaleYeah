@@ -19,7 +19,11 @@ struct FilePickerSheet: View {
                     }
                 }
                 Section("Folders") {
-                    ForEach(store.folders.filter { $0.kind == .custom || $0.kind == .archive || $0.kind == .inbox }) { folder in
+                    // Same-account only — never offer Kale/M365 folders for Gmail mail (or vice versa).
+                    ForEach(store.folders.filter {
+                        ($0.kind == .custom || $0.kind == .archive || $0.kind == .inbox)
+                            && $0.accountID == message.accountID
+                    }) { folder in
                         Button {
                             onPick(folder.id)
                         } label: {

@@ -8,9 +8,11 @@ struct ContentView: View {
 
     @State private var selection: LadderSelection = .unifiedInbox
     @State private var selectedMessageID: MailMessage.ID?
+    @State private var selectedMessageIDs: Set<MailMessage.ID> = []
     @State private var inlineCompose: ComposeDraft?
     @State private var showSettings = false
     @State private var fileTarget: MailMessage?
+    @State private var fileTargets: [MailMessage] = []
     @State private var snoozeTarget: MailMessage?
     @State private var didHydrate = false
     @State private var dismissGmailPrompt = UserDefaults.standard.bool(forKey: GmailDefaults.promptDismissedKey)
@@ -31,7 +33,9 @@ struct ContentView: View {
             MessageListView(
                 selection: selection,
                 selectedMessageID: $selectedMessageID,
+                selectedMessageIDs: $selectedMessageIDs,
                 onFile: { fileTarget = $0 },
+                onFileMany: { fileTargets = $0 },
                 onSnooze: { snoozeTarget = $0 }
             )
             .navigationSplitViewColumnWidth(min: 280, ideal: 360, max: 480)
@@ -55,6 +59,22 @@ struct ContentView: View {
             }
             .environment(store)
             .preferredColorScheme(.light)
+        }
+        .sheet(isPresented: Binding(
+            get: { !fileTargets.isEmpty },
+            set: { if !$0 { fileTargets = [] } }
+        )) {
+            if let lead = fileTargets.first {
+                FilePickerSheet(message: lead) { folderID in
+                    let account = lead.accountID
+                    for message in fileTargets where message.accountID == account {
+                        store.file(message.id, into: folderID)
+                    }
+                    fileTargets = []
+                }
+                .environment(store)
+                .preferredColorScheme(.light)
+            }
         }
         .sheet(item: $snoozeTarget) { message in
             SnoozeSheet { date in
@@ -163,7 +183,14 @@ struct ContentView: View {
         .focusedSceneValue(\.rapActions, RapActions(
             archive: { archiveSelected() },
             flag: { flagSelected() },
-            file: { if let m = selectedMessage { fileTarget = m } },
+            file: {
+                let msgs = visibleMessages.filter { selectedMessageIDs.contains($0.id) }
+                if msgs.count > 1 {
+                    let accounts = Set(msgs.map(\.accountID))
+                    if accounts.count == 1 { fileTargets = msgs; return }
+                }
+                if let m = selectedMessage { fileTarget = m }
+            },
             snooze: { if let m = selectedMessage { snoozeTarget = m } },
             next: { moveSelection(1) },
             prev: { moveSelection(-1) },
@@ -244,14 +271,18 @@ struct ContentView: View {
                 flags: store.flags,
                 currentFlagID: selectedMessage?.flagID,
                 isFlagged: selectedMessage?.isFlagged ?? false,
-                isEnabled: selectedMessage != nil,
+                isEnabled: selectedMessage != nil || !selectedMessageIDs.isEmpty,
                 onSelect: { flagID in
-                    guard let id = selectedMessageID else { return }
-                    store.setFlag(id, flagID: flagID)
+                    let ids = selectedMessageIDs.isEmpty
+                        ? Set([selectedMessageID].compactMap { $0 })
+                        : selectedMessageIDs
+                    for id in ids { store.setFlag(id, flagID: flagID) }
                 },
                 onClear: {
-                    guard let id = selectedMessageID else { return }
-                    store.setFlag(id, flagID: nil)
+                    let ids = selectedMessageIDs.isEmpty
+                        ? Set([selectedMessageID].compactMap { $0 })
+                        : selectedMessageIDs
+                    for id in ids { store.setFlag(id, flagID: nil) }
                 }
             )
 
@@ -385,14 +416,21 @@ struct ContentView: View {
     }
 
     private func archiveSelected() {
-        guard let id = selectedMessageID else { return }
-        store.archive(id)
+        let ids = selectedMessageIDs.isEmpty
+            ? Set([selectedMessageID].compactMap { $0 })
+            : selectedMessageIDs
+        guard !ids.isEmpty else { return }
+        for id in ids { store.archive(id) }
+        selectedMessageIDs = []
         moveSelection(1)
+        if let id = selectedMessageID { selectedMessageIDs = [id] }
     }
 
     private func flagSelected() {
-        guard let id = selectedMessageID else { return }
-        store.flagShortcut(id)
+        let ids = selectedMessageIDs.isEmpty
+            ? Set([selectedMessageID].compactMap { $0 })
+            : selectedMessageIDs
+        for id in ids { store.flagShortcut(id) }
     }
 
     private func moveSelection(_ delta: Int) {
@@ -403,6 +441,9 @@ struct ContentView: View {
             selectedMessageID = list[next].id
         } else {
             selectedMessageID = list[0].id
+        }
+        if let id = selectedMessageID {
+            selectedMessageIDs = [id]
         }
     }
 

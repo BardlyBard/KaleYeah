@@ -313,13 +313,16 @@ actor SimpleIMAPClient {
             let cc = parseAddressList(headers["cc"] ?? "")
             let subject = decodeMIMEHeader(headers["subject"] ?? "(no subject)")
             let date = parseIMAPDate(headers["date"] ?? "") ?? Date()
+            let cleanedBodyText = MimeBodyParser.stripIMAPFraming(from: bodyText)
             let parsed = MimeBodyParser.parse(
-                textBody: bodyText,
+                textBody: cleanedBodyText,
                 contentTypeHeader: headers["content-type"],
                 contentTransferEncoding: headers["content-transfer-encoding"]
             )
-            let body = parsed.body.isEmpty ? subject : parsed.body
-            let snippet = parsed.snippet.isEmpty ? String(subject.prefix(140)) : parsed.snippet
+            let repaired = MimeBodyParser.repairStoredBody(parsed.body, isHTML: parsed.isHTML)
+            let body = repaired.body.isEmpty ? subject : repaired.body
+            let isHTMLFinal = repaired.isHTML && !body.isEmpty
+            let snippet = parsed.snippet.isEmpty ? String(subject.prefix(140)) : MimeBodyParser.makeSnippet(from: body, isHTML: isHTMLFinal)
             let messageIdRaw = (headers["message-id"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return IMAPFetchedMessage(
                 uid: uid,
@@ -331,7 +334,7 @@ actor SimpleIMAPClient {
                 subject: subject,
                 date: date,
                 body: body,
-                isHTML: parsed.isHTML && !parsed.body.isEmpty,
+                isHTML: isHTMLFinal,
                 snippet: snippet,
                 rawAttachments: parsed.attachments,
                 internetMessageId: messageIdRaw.isEmpty ? nil : messageIdRaw
@@ -341,22 +344,85 @@ actor SimpleIMAPClient {
     }
 
     private func extractSection(_ block: String, named: String) -> String? {
-        let needle = "BODY[\(named)"
-        guard let idx = block.uppercased().range(of: needle.uppercased())?.lowerBound else { return nil }
-        let from = block[idx...]
-        if let litOpen = from.range(of: "{"),
-           let litClose = from.range(of: "}"),
-           litOpen.upperBound <= litClose.lowerBound,
-           let size = Int(from[litOpen.upperBound..<litClose.lowerBound]) {
-            var start = litClose.upperBound
-            if start < from.endIndex, from[start] == "\n" { start = from.index(after: start) }
-            if start < from.endIndex, from[start] == "\r" { start = from.index(after: start) }
-            if start < from.endIndex, from[start] == "\n" { start = from.index(after: start) }
-            let end = from.index(start, offsetBy: min(size, from.distance(from: start, to: from.endIndex)))
-            return String(from[start..<end])
+        // Case-insensitive match of BODY[NAME] / BODY[NAME (...)] on the original string
+        // (never index via String.uppercased() — indices are not transferable).
+        let pattern: String
+        if named.uppercased() == "TEXT" {
+            pattern = #"BODY\[TEXT\]"#
+        } else if named.uppercased().hasPrefix("HEADER") {
+            pattern = #"BODY\[HEADER(?:\.FIELDS)?(?:\s*\([^)]*\))?\]"#
+        } else {
+            let escaped = NSRegularExpression.escapedPattern(for: named)
+            pattern = "BODY\\[\(escaped)(?:\\s*\\([^)]*\\))?\\]"
         }
-        if let q = extractQuotedTail(String(from)) { return q }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let full = NSRange(block.startIndex..., in: block)
+        guard let match = regex.firstMatch(in: block, options: [], range: full),
+              let matchRange = Range(match.range, in: block) else { return nil }
+
+        var cursor = matchRange.upperBound
+        while cursor < block.endIndex, block[cursor].isWhitespace {
+            cursor = block.index(after: cursor)
+        }
+        guard cursor < block.endIndex else { return nil }
+
+        if block[cursor] == "{" {
+            // IMAP literal byte-count; sizes are octets, not Swift Characters.
+            guard let close = block[cursor...].firstIndex(of: "}") else { return nil }
+            let sizeStr = block[block.index(after: cursor)..<close]
+            guard let byteCount = Int(sizeStr), byteCount >= 0 else { return nil }
+            var start = block.index(after: close)
+            if start < block.endIndex, block[start] == "\r" { start = block.index(after: start) }
+            if start < block.endIndex, block[start] == "\n" { start = block.index(after: start) }
+
+            let utf8 = Array(block.utf8)
+            let startUTF8 = Array(block[..<start].utf8).count
+            let hardCap = byteDistanceToNextIMAPSection(in: block, from: start)
+            let take = min(byteCount, hardCap, max(0, utf8.count - startUTF8))
+            guard take >= 0, startUTF8 + take <= utf8.count else { return nil }
+            let slice = Data(utf8[startUTF8..<(startUTF8 + take)])
+            var text = String(data: slice, encoding: .utf8)
+                ?? String(data: slice, encoding: .isoLatin1)
+                ?? String(decoding: slice, as: UTF8.self)
+            text = stripTrailingIMAPFraming(text)
+            return text
+        }
+
+        if block[cursor] == "\"" {
+            if let q = extractQuotedTail(String(block[cursor...])) {
+                return stripTrailingIMAPFraming(q)
+            }
+        }
+        let restUpper = block[cursor...].uppercased()
+        if restUpper.hasPrefix("NIL") { return "" }
         return nil
+    }
+
+    /// Bytes from `from` until the next top-level IMAP BODY[ section (or end).
+    private func byteDistanceToNextIMAPSection(in block: String, from: String.Index) -> Int {
+        let tail = String(block[from...])
+        guard let regex = try? NSRegularExpression(pattern: #"\r?\n\s*BODY\["#, options: [.caseInsensitive]) else {
+            return Array(tail.utf8).count
+        }
+        let range = NSRange(tail.startIndex..., in: tail)
+        if let match = regex.firstMatch(in: tail, options: [], range: range),
+           let r = Range(match.range, in: tail) {
+            return Array(tail[tail.startIndex..<r.lowerBound].utf8).count
+        }
+        return Array(tail.utf8).count
+    }
+
+    private func stripTrailingIMAPFraming(_ text: String) -> String {
+        var s = text
+        let markers = ["\n BODY[", "\r\n BODY[", "\nBODY[", "\r\nBODY[", " BODY[HEADER"]
+        var cut: String.Index?
+        for marker in markers {
+            if let r = s.range(of: marker, options: .caseInsensitive) {
+                if cut == nil || r.lowerBound < cut! { cut = r.lowerBound }
+            }
+        }
+        if let cut { s = String(s[..<cut]) }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func parseHeaders(_ raw: String) -> [String: String] {

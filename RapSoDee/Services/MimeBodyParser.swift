@@ -15,12 +15,65 @@ struct ParsedMailBody: Sendable {
 
 /// Parses IMAP BODY[TEXT] (plus top-level Content-Type / CTE) into a displayable body + attachments.
 enum MimeBodyParser {
+    /// Remove leaked IMAP FETCH framing (e.g. `BODY[HEADER.FIELDS …]`) from a body string.
+    static func stripIMAPFraming(from text: String) -> String {
+        var s = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let markers = ["\n BODY[", "\nBODY[", " BODY[HEADER", "\nUID ", "\nFLAGS ("]
+        var cut: String.Index?
+        for marker in markers {
+            if let r = s.range(of: marker, options: .caseInsensitive) {
+                if cut == nil || r.lowerBound < cut! { cut = r.lowerBound }
+            }
+        }
+        // Also handle framing at index 0 (rare).
+        if s.uppercased().hasPrefix("BODY[") {
+            return ""
+        }
+        if let cut { s = String(s[..<cut]) }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Repair bodies already persisted with base64 HTML and/or IMAP framing leaks.
+    static func repairStoredBody(_ body: String, isHTML: Bool) -> (body: String, isHTML: Bool) {
+        let text = stripIMAPFraming(from: body)
+        guard !text.isEmpty else { return ("", false) }
+
+        // Heuristic: single-part base64 HTML that never got CTE-decoded.
+        if looksLikeBase64Payload(text) {
+            let cleaned = text.components(separatedBy: .whitespacesAndNewlines).joined()
+            if let data = Data(base64Encoded: cleaned, options: [.ignoreUnknownCharacters]),
+               let decoded = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+               looksLikeHTMLDocument(decoded) || decoded.contains("<") {
+                return (decoded.trimmingCharacters(in: .whitespacesAndNewlines), true)
+            }
+        }
+
+        let html = isHTML || looksLikeHTMLDocument(text)
+        return (text, html && !text.isEmpty)
+    }
+
+    private static func looksLikeBase64Payload(_ text: String) -> Bool {
+        let sample = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard sample.count >= 32 else { return false }
+        let prefix = String(sample.prefix(32))
+        // Common base64 for "<html" / "<!DOCTYPE" / "<HTML"
+        if prefix.hasPrefix("PGh0bWw") || prefix.hasPrefix("PEhUTUw") || prefix.hasPrefix("PCFkb2N0") || prefix.hasPrefix("PCFET0NU") {
+            return true
+        }
+        if sample.contains("<") || sample.contains(" ") && sample.contains("Content-") { return false }
+        let compact = sample.components(separatedBy: .whitespacesAndNewlines).joined()
+        guard compact.count >= 64 else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "+/="))
+        guard compact.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        return true
+    }
+
     static func parse(
         textBody: String,
         contentTypeHeader: String?,
         contentTransferEncoding: String?
     ) -> ParsedMailBody {
-        let normalized = textBody.replacingOccurrences(of: "\r\n", with: "\n")
+        let normalized = stripIMAPFraming(from: textBody.replacingOccurrences(of: "\r\n", with: "\n"))
         let typeHeader = contentTypeHeader?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cte = contentTransferEncoding?.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -40,7 +93,15 @@ enum MimeBodyParser {
         }
 
         // Single-part: decode transfer encoding, then decide html vs plain from Content-Type.
-        let decoded = decodeTransferEncoding(normalized, cte: cte)
+        var decoded = decodeTransferEncoding(normalized, cte: cte)
+        // If CTE was missing/wrong but payload is clearly base64 HTML, decode anyway.
+        if !looksLikeHTMLDocument(decoded), looksLikeBase64Payload(decoded) {
+            let repaired = repairStoredBody(decoded, isHTML: typeHeader.lowercased().contains("text/html"))
+            if repaired.isHTML || looksLikeHTMLDocument(repaired.body) {
+                return finalize(repaired.body, isHTML: true, attachments: [])
+            }
+            decoded = repaired.body
+        }
         let isHTML = typeHeader.lowercased().contains("text/html") || looksLikeHTMLDocument(decoded)
         if isHTML {
             return finalize(decoded, isHTML: true, attachments: [])

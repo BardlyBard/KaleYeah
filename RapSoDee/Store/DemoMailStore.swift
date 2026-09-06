@@ -244,6 +244,11 @@ final class DemoMailStore: MailStore {
 
     func file(_ id: UUID, into folderID: UUID) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard let dest = folders.first(where: { $0.id == folderID }) else { return }
+        // Cross-account filing is not supported (Gmail labels ≠ M365 folders).
+        if let destAccount = dest.accountID, destAccount != messages[i].accountID {
+            return
+        }
         messages[i].folderID = folderID
         messages[i].snoozeUntil = nil
     }

@@ -7,47 +7,53 @@ struct MessageListView: View {
     @Environment(DemoMailStore.self) private var store
     @Environment(\.colorScheme) private var colorScheme
     let selection: LadderSelection
+    /// Focused message for the reading pane (last interacted / primary).
     @Binding var selectedMessageID: MailMessage.ID?
+    /// Multi-select set — Cmd-click / Shift-click on macOS List, plus row checkboxes.
+    @Binding var selectedMessageIDs: Set<MailMessage.ID>
     var onFile: (MailMessage) -> Void
+    var onFileMany: ([MailMessage]) -> Void
     var onSnooze: (MailMessage) -> Void
 
     private var messages: [MailMessage] {
         store.messages(for: selection)
     }
 
+    private var selectedMessages: [MailMessage] {
+        messages.filter { selectedMessageIDs.contains($0.id) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             filterBar
-            List(selection: $selectedMessageID) {
+            if selectedMessageIDs.count > 1 {
+                bulkActionBar
+            }
+            List(selection: $selectedMessageIDs) {
                 ForEach(messages) { message in
-                    MessageRowView(message: message)
+                    MessageRowView(
+                        message: message,
+                        isChecked: selectedMessageIDs.contains(message.id),
+                        onToggleCheck: { toggleCheck(message.id) }
+                    )
                         .tag(message.id)
                         .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(rowWash(for: message))
                         .contextMenu {
-                            Menu("Flag") {
-                                FlagMenuContent(
-                                    flags: store.flags,
-                                    currentFlagID: message.flagID,
-                                    isFlagged: message.isFlagged,
-                                    onSelect: { store.setFlag(message.id, flagID: $0) },
-                                    onClear: { store.setFlag(message.id, flagID: nil) }
-                                )
+                            if selectedMessageIDs.count > 1, selectedMessageIDs.contains(message.id) {
+                                bulkContextMenu
+                            } else {
+                                singleContextMenu(for: message)
                             }
-                            Button("File…") { onFile(message) }
-                            Button("Snooze…") { onSnooze(message) }
-                            Button("Archive") { store.archive(message.id) }
-                            Divider()
-                            Button("Delete", role: .destructive) { store.deleteRecessed(message.id) }
                         }
                 }
             }
             .listStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
-            // Keep controls usable but never let leaf-green own row selection.
             .tint(MuseTheme.oatmeal)
             .background(DisableListSelectionHighlight())
+            .environment(\.defaultMinListRowHeight, 1)
         }
         .background(
             RoundedRectangle(cornerRadius: MuseTheme.cornerCard, style: .continuous)
@@ -62,17 +68,48 @@ struct MessageListView: View {
         .background(MuseTheme.paneChrome(scheme: colorScheme))
         .navigationTitle(title)
         .onChange(of: selection) { _, _ in
+            selectedMessageIDs = []
             if let first = messages.first {
                 selectedMessageID = first.id
+                selectedMessageIDs = [first.id]
             } else {
                 selectedMessageID = nil
             }
         }
+        .onChange(of: selectedMessageIDs) { _, new in
+            syncFocusedMessage(from: new)
+        }
         .onAppear {
-            if selectedMessageID == nil {
-                selectedMessageID = messages.first?.id
+            if selectedMessageID == nil, let first = messages.first {
+                selectedMessageID = first.id
+                selectedMessageIDs = [first.id]
+            } else if let id = selectedMessageID, selectedMessageIDs.isEmpty {
+                selectedMessageIDs = [id]
             }
         }
+    }
+
+    private func syncFocusedMessage(from ids: Set<MailMessage.ID>) {
+        if ids.isEmpty {
+            selectedMessageID = nil
+            return
+        }
+        if let id = selectedMessageID, ids.contains(id) { return }
+        // Prefer visible order for a stable primary when Shift-selecting a range.
+        if let firstVisible = messages.first(where: { ids.contains($0.id) }) {
+            selectedMessageID = firstVisible.id
+        } else {
+            selectedMessageID = ids.first
+        }
+    }
+
+    private func toggleCheck(_ id: MailMessage.ID) {
+        if selectedMessageIDs.contains(id) {
+            selectedMessageIDs.remove(id)
+        } else {
+            selectedMessageIDs.insert(id)
+        }
+        selectedMessageID = id
     }
 
     private var title: String {
@@ -114,6 +151,134 @@ struct MessageListView: View {
         .padding(.vertical, 10)
     }
 
+    private var bulkActionBar: some View {
+        HStack(spacing: 10) {
+            Text("\(selectedMessageIDs.count) selected")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(MuseTheme.ink.opacity(0.75))
+
+            Button("Read") { bulkMarkRead(true) }
+                .buttonStyle(MuseCapsuleButtonStyle())
+            Button("Unread") { bulkMarkRead(false) }
+                .buttonStyle(MuseCapsuleButtonStyle())
+
+            Menu("Flag") {
+                ForEach(store.flags) { flag in
+                    Button(flag.name) {
+                        for id in selectedMessageIDs {
+                            store.setFlag(id, flagID: flag.id)
+                        }
+                    }
+                }
+                Divider()
+                Button("Clear Flag") {
+                    for id in selectedMessageIDs {
+                        store.setFlag(id, flagID: nil)
+                    }
+                }
+            }
+            .buttonStyle(MuseCapsuleButtonStyle())
+
+            Button("File…") { bulkFile() }
+                .buttonStyle(MuseCapsuleButtonStyle())
+                .disabled(!bulkFileEnabled)
+
+            Button("Archive") { bulkArchive() }
+                .buttonStyle(MuseCapsuleButtonStyle(prominent: true))
+
+            Spacer(minLength: 0)
+
+            Button("Clear") {
+                if let id = selectedMessageID {
+                    selectedMessageIDs = [id]
+                } else {
+                    selectedMessageIDs = []
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(MuseTheme.oatmeal.opacity(0.45))
+        .help(bulkFileEnabled ? "File selected mail into a same-account folder" : "Select mail from one account to file")
+    }
+
+    private var bulkFileEnabled: Bool {
+        let accounts = Set(selectedMessages.map(\.accountID))
+        return accounts.count == 1 && !selectedMessages.isEmpty
+    }
+
+    private func bulkMarkRead(_ read: Bool) {
+        for id in selectedMessageIDs {
+            store.markRead(id, read: read)
+        }
+    }
+
+    private func bulkArchive() {
+        for id in Array(selectedMessageIDs) {
+            store.archive(id)
+        }
+        selectedMessageIDs = []
+        selectedMessageID = messages.first?.id
+        if let id = selectedMessageID { selectedMessageIDs = [id] }
+    }
+
+    private func bulkFile() {
+        let msgs = selectedMessages
+        guard let first = msgs.first else { return }
+        let account = first.accountID
+        let same = msgs.filter { $0.accountID == account }
+        guard same.count == msgs.count else { return }
+        if same.count == 1 {
+            onFile(same[0])
+        } else {
+            onFileMany(same)
+        }
+    }
+
+    @ViewBuilder
+    private func singleContextMenu(for message: MailMessage) -> some View {
+        Menu("Flag") {
+            FlagMenuContent(
+                flags: store.flags,
+                currentFlagID: message.flagID,
+                isFlagged: message.isFlagged,
+                onSelect: { store.setFlag(message.id, flagID: $0) },
+                onClear: { store.setFlag(message.id, flagID: nil) }
+            )
+        }
+        Button("Mark Read") { store.markRead(message.id, read: true) }
+        Button("Mark Unread") { store.markRead(message.id, read: false) }
+        Button("File…") { onFile(message) }
+        Button("Snooze…") { onSnooze(message) }
+        Button("Archive") { store.archive(message.id) }
+        // Standing rule: no Delete in multi-select; single still archives via Archive.
+        // Delete remains available only via existing recessed path elsewhere if needed — omit here for consistency with never-delete bulk rule.
+    }
+
+    @ViewBuilder
+    private var bulkContextMenu: some View {
+        Button("Mark Read") { bulkMarkRead(true) }
+        Button("Mark Unread") { bulkMarkRead(false) }
+        Menu("Flag") {
+            ForEach(store.flags) { flag in
+                Button(flag.name) {
+                    for id in selectedMessageIDs { store.setFlag(id, flagID: flag.id) }
+                }
+            }
+            Divider()
+            Button("Clear Flag") {
+                for id in selectedMessageIDs { store.setFlag(id, flagID: nil) }
+            }
+        }
+        if bulkFileEnabled {
+            Button("File…") { bulkFile() }
+        }
+        Button("Archive") { bulkArchive() }
+        // No Delete — standing rule.
+    }
+
     @ViewBuilder
     private func rowWash(for message: MailMessage) -> some View {
         let fill = rowBackground(for: message)
@@ -134,9 +299,8 @@ struct MessageListView: View {
     }
 
     private func rowBackground(for message: MailMessage) -> Color {
-        let isSelected = selectedMessageID == message.id
+        let isSelected = selectedMessageIDs.contains(message.id)
 
-        // Flagged: soft flag wash; stronger when selected/focused.
         if message.isFlagged {
             let hex = flagHex(for: message)
             if isSelected {
@@ -145,12 +309,10 @@ struct MessageListView: View {
             return MuseTheme.flagWash(hex, scheme: colorScheme)
         }
 
-        // Unflagged + selected/focused: clear light grey (never leaf-green).
         if isSelected {
             return MuseTheme.selectionGrey(scheme: colorScheme)
         }
 
-        // Unflagged + not selected: white / paper — no grey or account tint wash.
         if message.disposition == .pendingApproval {
             return MuseTheme.approveSoft.opacity(0.45)
         }
@@ -161,9 +323,21 @@ struct MessageListView: View {
 struct MessageRowView: View {
     @Environment(DemoMailStore.self) private var store
     let message: MailMessage
+    var isChecked: Bool = false
+    var onToggleCheck: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
+            Button {
+                onToggleCheck?()
+            } label: {
+                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                    .font(.body)
+                    .foregroundStyle(isChecked ? MuseTheme.leaf : MuseTheme.ink.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+            .help(isChecked ? "Deselect" : "Select")
+
             Circle()
                 .fill(message.isRead ? Color.clear : MuseTheme.leaf)
                 .frame(width: 8, height: 8)
@@ -220,7 +394,6 @@ struct MessageRowView: View {
         return MuseTheme.approve
     }
 
-    /// Sent lists: show To (sender is always us). Elsewhere: From.
     private var primaryPartyLabel: String {
         let inSent = store.folder(for: message.folderID)?.kind == .sent
         if inSent {
@@ -254,6 +427,9 @@ private struct DisableListSelectionHighlight: NSViewRepresentable {
             guard let table = findTableView(startingAt: nsView) else { return }
             if table.selectionHighlightStyle != .none {
                 table.selectionHighlightStyle = .none
+            }
+            if table.allowsMultipleSelection == false {
+                table.allowsMultipleSelection = true
             }
         }
     }
