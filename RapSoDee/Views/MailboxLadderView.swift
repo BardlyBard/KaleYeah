@@ -2,11 +2,16 @@ import SwiftUI
 
 struct MailboxLadderView: View {
     @Environment(DemoMailStore.self) private var store
+    @Environment(MailDragController.self) private var mailDrag
     @Environment(\.colorScheme) private var colorScheme
     @Binding var selection: LadderSelection
+    /// Called after a successful drag-file so the list can clear selection.
+    var onMessagesFiled: ([UUID]) -> Void = { _ in }
 
     /// Per-account mailbox list expand state. Missing keys default to expanded.
     @State private var expandedByAccount: [UUID: Bool] = [:]
+    /// Folder currently targeted by an in-app mail drag (for muse drop highlight).
+    @State private var dropTargetFolderID: UUID?
     @State private var renameAccountTarget: MailAccount?
     @State private var renameFolderTarget: MailFolder?
     @State private var newFolderAccount: MailAccount?
@@ -226,17 +231,19 @@ struct MailboxLadderView: View {
                 ForEach(folders) { folder in
                     let tag = LadderSelection.folder(folder.id)
                     let selected = selection == tag
+                    let dropOK = mailDrag.canDrop(onto: folder)
+                    let dropHot = dropTargetFolderID == folder.id && dropOK
                     Button {
                         selection = tag
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: icon(for: folder.kind))
                                 .font(.body)
-                                .foregroundStyle(selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72))
+                                .foregroundStyle(dropHot ? MuseTheme.leaf : (selected ? MuseTheme.leaf : MuseTheme.ink.opacity(0.72)))
                                 .frame(width: 18)
                             Text(store.displayName(for: folder))
                                 .font(.body)
-                                .fontWeight(selected ? .semibold : .regular)
+                                .fontWeight((selected || dropHot) ? .semibold : .regular)
                                 .foregroundStyle(MuseTheme.ink)
                             Spacer(minLength: 0)
                             unreadCountLabel(unreadCount(for: .folder(folder.id)))
@@ -244,7 +251,14 @@ struct MailboxLadderView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background {
-                            if selected {
+                            if dropHot {
+                                RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                    .fill(MuseTheme.leaf.opacity(0.18))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
+                                            .strokeBorder(MuseTheme.leaf.opacity(0.55), lineWidth: 1.5)
+                                    }
+                            } else if selected {
                                 RoundedRectangle(cornerRadius: MuseTheme.cornerSmall, style: .continuous)
                                     .fill(MuseTheme.sage.opacity(colorScheme == .dark ? 0.55 : 0.92))
                                     .overlay {
@@ -257,6 +271,12 @@ struct MailboxLadderView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 6)
+                    .modifier(ConditionalMailDrop(
+                        folder: folder,
+                        enabled: dropOK,
+                        dropTargetFolderID: $dropTargetFolderID,
+                        handle: { handleDrop($0, onto: folder) }
+                    ))
                     .contextMenu {
                         Button("Rename Mailbox…") {
                             renameText = store.displayName(for: folder)
@@ -443,6 +463,32 @@ struct MailboxLadderView: View {
             .sorted { $0.sortOrder < $1.sortOrder }
     }
 
+
+    /// File dropped mail into a same-account ladder folder. Rejects cross-account / non-fileable kinds.
+    @discardableResult
+    private func handleDrop(_ items: [MailFileDragPayload], onto folder: MailFolder) -> Bool {
+        guard let payload = items.first else { return false }
+        guard mailDrag.canDrop(payload: payload, onto: folder) else {
+            dropTargetFolderID = nil
+            return false
+        }
+        // Defensive: only file messages that still match the drag account.
+        var filed: [UUID] = []
+        for id in payload.messageIDs {
+            if let message = store.messages.first(where: { $0.id == id }),
+               message.accountID == payload.accountID {
+                store.file(id, into: folder.id)
+                filed.append(id)
+            }
+        }
+        dropTargetFolderID = nil
+        mailDrag.end()
+        if !filed.isEmpty {
+            onMessagesFiled(filed)
+        }
+        return !filed.isEmpty
+    }
+
     private func icon(for kind: FolderKind) -> String {
         switch kind {
         case .inbox: return "tray"
@@ -481,5 +527,31 @@ private struct RenameSheet: View {
         }
         .padding(20)
         .frame(width: 360)
+    }
+}
+
+
+/// Drop registration only while this folder is a valid same-account target — invalid rows refuse with no highlight.
+private struct ConditionalMailDrop: ViewModifier {
+    let folder: MailFolder
+    let enabled: Bool
+    @Binding var dropTargetFolderID: UUID?
+    let handle: ([MailFileDragPayload]) -> Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .dropDestination(for: MailFileDragPayload.self) { items, _ in
+                    handle(items)
+                } isTargeted: { hovering in
+                    if hovering {
+                        dropTargetFolderID = folder.id
+                    } else if dropTargetFolderID == folder.id {
+                        dropTargetFolderID = nil
+                    }
+                }
+        } else {
+            content
+        }
     }
 }

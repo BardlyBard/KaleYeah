@@ -50,6 +50,7 @@
 		EC4E203ACF0DB47B239085C2 /* MessageListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */; };
 		F85A6AD2705AE7373DD565C4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */; };
 		F9F39F4348160FE98CF3C892 /* GmailSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB951F80DA297C00D44E728 /* GmailSyncService.swift */; };
+		FEC15030D8113A88A6AF2954 /* MailDragSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D273C8BEF0497D05EADB3161 /* MailDragSupport.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -90,6 +91,7 @@
 		BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailDisplayNames.swift; sourceTree = "<group>"; };
 		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
 		CAB5576A2D321340B581AB4B /* EMLFileParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EMLFileParser.swift; sourceTree = "<group>"; };
+		D273C8BEF0497D05EADB3161 /* MailDragSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailDragSupport.swift; sourceTree = "<group>"; };
 		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D65CFBC523465AD274159410 /* OpenSequence.mp4 */ = {isa = PBXFileReference; path = OpenSequence.mp4; sourceTree = "<group>"; };
 		DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleIMAPClient.swift; sourceTree = "<group>"; };
@@ -169,6 +171,7 @@
 				F1282089DC42D88ED01B5C74 /* HTMLMailWebView.swift */,
 				790C971D69A2BA935411A556 /* KeyboardCommands.swift */,
 				DDD343817DC7561DB08A98E3 /* MacSecureField.swift */,
+				D273C8BEF0497D05EADB3161 /* MailDragSupport.swift */,
 				31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */,
 			);
 			path = Components;
@@ -329,6 +332,7 @@
 				652C516C3580100CDF36E4FA /* MSALAuthService.swift in Sources */,
 				99040D356EC8DD63B1E52697 /* MacSecureField.swift in Sources */,
 				E8609093D92258F7B83F2C93 /* MailDisplayNames.swift in Sources */,
+				FEC15030D8113A88A6AF2954 /* MailDragSupport.swift in Sources */,
 				7C8893389E67FBB0273E9BCB /* MailIMAPProvider.swift in Sources */,
 				7023803FA9D62C07255808CF /* MailInlineCID.swift in Sources */,
 				6D7A2B5FCB6DBE4D1BECA8FD /* MailMessageCache.swift in Sources */,

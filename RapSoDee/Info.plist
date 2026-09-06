@@ -22,5 +22,20 @@
 	</array>
 	<key>MSALClientID</key>
 	<string>3f7dfcbe-daee-4902-a5db-cc779ad45c4b</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>RapSoDee Mail File Drag</string>
+			<key>UTTypeIdentifier</key>
+			<string>local.rapsodee.mail.file-drag</string>
+			<key>UTTypeTagSpecification</key>
+			<dict/>
+		</dict>
+	</array>
 </dict>
 </plist>

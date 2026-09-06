@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var selection: LadderSelection = .unifiedInbox
     @State private var selectedMessageID: MailMessage.ID?
     @State private var selectedMessageIDs: Set<MailMessage.ID> = []
+    @State private var mailDrag = MailDragController()
     @State private var inlineCompose: ComposeDraft?
     @State private var showSettings = false
     @State private var fileTarget: MailMessage?
@@ -27,7 +28,20 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            MailboxLadderView(selection: $selection)
+            MailboxLadderView(selection: $selection, onMessagesFiled: { filed in
+                selectedMessageIDs.subtract(filed)
+                if let id = selectedMessageID, filed.contains(id) {
+                    selectedMessageID = visibleMessages.first(where: { !filed.contains($0.id) })?.id
+                        ?? store.messages(for: selection).first?.id
+                    if let id = selectedMessageID {
+                        selectedMessageIDs = [id]
+                    } else {
+                        selectedMessageIDs = []
+                    }
+                } else if selectedMessageIDs.isEmpty, let id = selectedMessageID {
+                    selectedMessageIDs = [id]
+                }
+            })
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } content: {
             MessageListView(
@@ -45,6 +59,7 @@ struct ContentView: View {
         .searchable(text: Bindable(store).searchText, placement: .toolbar, prompt: "Search from, subject, snippet")
         .toolbar { toolbarContent }
         .preferredColorScheme(.light)
+        .environment(mailDrag)
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environment(store)

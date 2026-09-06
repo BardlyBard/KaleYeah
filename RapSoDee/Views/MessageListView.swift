@@ -5,6 +5,7 @@ import AppKit
 
 struct MessageListView: View {
     @Environment(DemoMailStore.self) private var store
+    @Environment(MailDragController.self) private var mailDrag
     @Environment(\.colorScheme) private var colorScheme
     let selection: LadderSelection
     /// Focused message for the reading pane (last interacted / primary).
@@ -40,6 +41,9 @@ struct MessageListView: View {
                         .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(rowWash(for: message))
+                        .draggable(dragPayload(for: message)) {
+                            dragPreview(for: message)
+                        }
                         .contextMenu {
                             if selectedMessageIDs.count > 1, selectedMessageIDs.contains(message.id) {
                                 bulkContextMenu
@@ -235,6 +239,49 @@ struct MessageListView: View {
         } else {
             onFileMany(same)
         }
+    }
+
+
+    /// Build drag payload at drag-start (`draggable` autoclosure). Multi-select → entire same-account selection.
+    private func dragPayload(for message: MailMessage) -> MailFileDragPayload {
+        let ids: [UUID]
+        if selectedMessageIDs.contains(message.id), selectedMessageIDs.count > 1 {
+            let sameAccount = selectedMessages.filter { $0.accountID == message.accountID }.map(\.id)
+            ids = sameAccount.isEmpty ? [message.id] : sameAccount
+        } else {
+            ids = [message.id]
+        }
+        mailDrag.begin(messageIDs: ids, accountID: message.accountID)
+        return MailFileDragPayload(messageIDs: ids, accountID: message.accountID)
+    }
+
+    @ViewBuilder
+    private func dragPreview(for message: MailMessage) -> some View {
+        let count = mailDrag.messageIDs.isEmpty ? 1 : mailDrag.messageIDs.count
+        HStack(spacing: 8) {
+            Image(systemName: count > 1 ? "envelope.open.fill" : "envelope.fill")
+                .foregroundStyle(MuseTheme.leaf)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(count > 1 ? "\(count) messages" : (message.subject.isEmpty ? "(No subject)" : message.subject))
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if count == 1 {
+                    Text(message.fromName.isEmpty ? message.fromAddress : message.fromName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(MuseTheme.paper, in: RoundedRectangle(cornerRadius: MuseTheme.cornerMed, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: MuseTheme.cornerMed, style: .continuous)
+                .strokeBorder(MuseTheme.oatmeal.opacity(0.5), lineWidth: 1)
+        }
+        .frame(maxWidth: 240)
+        .preferredColorScheme(.light)
     }
 
     @ViewBuilder
