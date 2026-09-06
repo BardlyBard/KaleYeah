@@ -63,6 +63,7 @@ struct SettingsView: View {
                     case .creature:
                         oneInboxSection
                         appearanceSection
+                        openSequenceSection
                         flagsSection
                         notificationsSection
                     }
@@ -909,6 +910,31 @@ struct SettingsView: View {
             }
         } header: {
             Text("Flags")
+        }
+    }
+
+
+    // MARK: - Open sequence
+
+    private var openSequenceSection: some View {
+        Section {
+            Toggle(
+                "Play open sequence on launch",
+                isOn: Binding(
+                    get: { OpenSequenceController.playOnLaunch },
+                    set: { OpenSequenceController.playOnLaunch = $0 }
+                )
+            )
+            Text("First launch plays once. Turn this on to see the muse envelope every time you open RapSoDee.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if OpenSequenceController.videoURL == nil {
+                Text("OpenSequence.mp4 is missing from the app bundle.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Open sequence")
         }
     }
 

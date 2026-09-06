@@ -15,6 +15,7 @@
 		2A1E9321BABD97AD78548B6D /* MailTLSConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFBCCB2127B4E1CE2B7084B /* MailTLSConnection.swift */; };
 		2E38EDF0247122E10ED00B41 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 011476096BD250F13FF78C8F /* SettingsView.swift */; };
 		2F5F3BA69B8E8E112432CCBB /* MicrosoftGraphMailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDAA6E648E7E3A19E87EF95 /* MicrosoftGraphMailService.swift */; };
+		36E71E3480D8BD8384BB3544 /* OpenSequenceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9383E9C81D198AC21E4F35 /* OpenSequenceView.swift */; };
 		407725313790A70F4FB51651 /* FilePickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36684E996FD0A65878AA7714 /* FilePickerSheet.swift */; };
 		44D55BDEBDDCA28F3D9F4426 /* EMLImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AEDE84CFAA0DDEA77C9C249 /* EMLImportService.swift */; };
 		557A93ACE054A26C7F01FFC6 /* MailModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */; };
@@ -37,8 +38,10 @@
 		B1FA5F68F6F98399692A202C /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = 424E105D9820BF1C15A3AE71 /* MSAL */; };
 		C8FA99B942BF2C51BD046893 /* MailboxLadderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */; };
 		CD80E90A36403943257098A6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */; };
+		CF8009EE8791A1205E23084B /* OpenSequence.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = D65CFBC523465AD274159410 /* OpenSequence.mp4 */; };
 		D9C3C97B3003ABC45783E189 /* MuseNewMailSound.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B620B26A6A368F2BD1812A /* MuseNewMailSound.swift */; };
 		DD7F161189C64E89C0E6CC78 /* SnoozeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */; };
+		DEC36700BC46493747AB1846 /* OpenSequenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5585615DDF1EB0BC2A93E84F /* OpenSequenceController.swift */; };
 		E12CD9618BE2AC560961F7EB /* MailStartTLSConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1512F3CAC81FA77F64B5F712 /* MailStartTLSConnection.swift */; };
 		E780B3DD20B3DF5B1CF9A77A /* MimeBodyParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 065C4804F8541313AE03AE2F /* MimeBodyParser.swift */; };
 		E8609093D92258F7B83F2C93 /* MailDisplayNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */; };
@@ -59,13 +62,14 @@
 		2D824C655A6789480B722FF9 /* KeychainCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainCredentialStore.swift; sourceTree = "<group>"; };
 		2EB951F80DA297C00D44E728 /* GmailSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GmailSyncService.swift; sourceTree = "<group>"; };
 		31117AFE1FA3F342DE0B32EF /* SnoozeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnoozeSheet.swift; sourceTree = "<group>"; };
-		338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Assets.xcassets; path = RapSoDee/Resources/Assets.xcassets; sourceTree = SOURCE_ROOT; };
 		36684E996FD0A65878AA7714 /* FilePickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePickerSheet.swift; sourceTree = "<group>"; };
 		3CDAA6E648E7E3A19E87EF95 /* MicrosoftGraphMailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrosoftGraphMailService.swift; sourceTree = "<group>"; };
 		45C740C8BCBCDCB3368CEA56 /* MailIMAPProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailIMAPProvider.swift; sourceTree = "<group>"; };
 		50A04D0B1BCF71BFE83DDF62 /* MailStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailStore.swift; sourceTree = "<group>"; };
 		52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingPaneView.swift; sourceTree = "<group>"; };
 		54CF85903B213FD9AB8392DC /* MailSignatureFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailSignatureFormatting.swift; sourceTree = "<group>"; };
+		5585615DDF1EB0BC2A93E84F /* OpenSequenceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenSequenceController.swift; sourceTree = "<group>"; };
 		684D7DD0B3944251C3A03C0B /* IMAPAccountSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMAPAccountSyncService.swift; sourceTree = "<group>"; };
 		767E35312326B1E0245C31C1 /* RapSoDee.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RapSoDee.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		790C971D69A2BA935411A556 /* KeyboardCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardCommands.swift; sourceTree = "<group>"; };
@@ -80,12 +84,14 @@
 		A4605E49DCDE9B499093CE4D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A5B620B26A6A368F2BD1812A /* MuseNewMailSound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MuseNewMailSound.swift; sourceTree = "<group>"; };
 		A7CE91C7730928036347EF9E /* MailInlineCID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailInlineCID.swift; sourceTree = "<group>"; };
+		AA9383E9C81D198AC21E4F35 /* OpenSequenceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenSequenceView.swift; sourceTree = "<group>"; };
 		B0C9AECDDE0F84C4226D0F33 /* SettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModels.swift; sourceTree = "<group>"; };
 		B384989846962FDE099FEC67 /* RapSoDee.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RapSoDee.entitlements; sourceTree = "<group>"; };
 		BBAB726E41BDEE0B1BA0358C /* MailDisplayNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailDisplayNames.swift; sourceTree = "<group>"; };
 		C4169F7E23AF5BCF9A4D7EF7 /* MailModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailModels.swift; sourceTree = "<group>"; };
 		CAB5576A2D321340B581AB4B /* EMLFileParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EMLFileParser.swift; sourceTree = "<group>"; };
 		D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		D65CFBC523465AD274159410 /* OpenSequence.mp4 */ = {isa = PBXFileReference; path = OpenSequence.mp4; sourceTree = "<group>"; };
 		DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleIMAPClient.swift; sourceTree = "<group>"; };
 		DDD343817DC7561DB08A98E3 /* MacSecureField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSecureField.swift; sourceTree = "<group>"; };
 		E6B499EDE5CBBE3B4E0A9AC5 /* MailMessageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailMessageCache.swift; sourceTree = "<group>"; };
@@ -110,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				338DE8FCA12DCFE43CDD2FDF /* Assets.xcassets */,
+				D65CFBC523465AD274159410 /* OpenSequence.mp4 */,
 				1D7A8B60201D7BD9EAD048A6 /* Sounds */,
 			);
 			path = Resources;
@@ -122,6 +129,7 @@
 				D46EDE5A1C2D6305B15CFF51 /* ContentView.swift */,
 				FA4668787772B7CB273E5A93 /* MailboxLadderView.swift */,
 				9CE72BCDFA97863F2C6EC926 /* MessageListView.swift */,
+				AA9383E9C81D198AC21E4F35 /* OpenSequenceView.swift */,
 				52761D2DA49CE8BF8C0A5F80 /* ReadingPaneView.swift */,
 				011476096BD250F13FF78C8F /* SettingsView.swift */,
 				674421DEA7A6B630C1C7CE83 /* Components */,
@@ -220,6 +228,7 @@
 				065C4804F8541313AE03AE2F /* MimeBodyParser.swift */,
 				7A8A1692C6D3CC0BE8528C9E /* MSALAuthService.swift */,
 				A5B620B26A6A368F2BD1812A /* MuseNewMailSound.swift */,
+				5585615DDF1EB0BC2A93E84F /* OpenSequenceController.swift */,
 				DB8699A887A81F09648F4367 /* SimpleIMAPClient.swift */,
 				0E6A5B46F7A1A51A4837F703 /* SimpleSMTPClient.swift */,
 			);
@@ -292,6 +301,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F85A6AD2705AE7373DD565C4 /* Assets.xcassets in Resources */,
+				CF8009EE8791A1205E23084B /* OpenSequence.mp4 in Resources */,
 				9747425BBC2BCB2BF0E1488A /* Sounds in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -333,6 +343,8 @@
 				E780B3DD20B3DF5B1CF9A77A /* MimeBodyParser.swift in Sources */,
 				D9C3C97B3003ABC45783E189 /* MuseNewMailSound.swift in Sources */,
 				6C2A503C59A90FA8295F2F4E /* MuseTheme.swift in Sources */,
+				DEC36700BC46493747AB1846 /* OpenSequenceController.swift in Sources */,
+				36E71E3480D8BD8384BB3544 /* OpenSequenceView.swift in Sources */,
 				A06737250A686C19726910AC /* RapSoDeeApp.swift in Sources */,
 				85A9A046D31C0C329CD61E35 /* ReadingPaneView.swift in Sources */,
 				5D3F06ABDEFE35BF6996AA4F /* SettingsModels.swift in Sources */,

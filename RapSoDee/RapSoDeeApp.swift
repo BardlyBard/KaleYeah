@@ -25,6 +25,7 @@ final class RapSoDeeAppDelegate: NSObject, NSApplicationDelegate {
 struct RapSoDeeApp: App {
     @NSApplicationDelegateAdaptor(RapSoDeeAppDelegate.self) private var appDelegate
     @State private var store = DemoMailStore()
+    @State private var showOpenSequence = OpenSequenceController.shouldPlayOnLaunch
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([PersistedFlag.self, PersistedAppSettings.self])
@@ -53,13 +54,24 @@ struct RapSoDeeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(store)
-                .tint(MuseTheme.leaf)
-                .preferredColorScheme(.light)
-                .onOpenURL { url in
-                    MSALAuthService.handle(url: url)
+            ZStack {
+                ContentView()
+                    .environment(store)
+                    .tint(MuseTheme.leaf)
+                    .preferredColorScheme(.light)
+                    .onOpenURL { url in
+                        MSALAuthService.handle(url: url)
+                    }
+
+                if showOpenSequence {
+                    OpenSequenceView {
+                        showOpenSequence = false
+                    }
+                    .transition(.opacity)
+                    .zIndex(1)
                 }
+            }
+            .animation(.easeInOut(duration: 0.35), value: showOpenSequence)
         }
         .modelContainer(sharedModelContainer)
         .defaultSize(width: 1280, height: 800)

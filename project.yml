@@ -23,12 +23,16 @@ targets:
         excludes:
           - "**/.DS_Store"
           - "Resources/Sounds/**"
+          - "Resources/OpenSequence.mp4"
+          - "Resources/Assets.xcassets"
       - path: RapSoDee/Resources/Assets.xcassets
         buildPhase: resources
         type: folder
       - path: RapSoDee/Resources/Sounds
         buildPhase: resources
         type: folder
+      - path: RapSoDee/Resources/OpenSequence.mp4
+        buildPhase: resources
     dependencies:
       - package: MSAL
         product: MSAL
