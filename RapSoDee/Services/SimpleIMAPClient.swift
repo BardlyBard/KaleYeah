@@ -250,6 +250,65 @@ actor SimpleIMAPClient {
         }
     }
 
+    /// MOVE (or COPY + delete) a UID into `destinationMailbox`.
+    /// Returns the destination UID when UIDPLUS COPYUID is present.
+    @discardableResult
+    func moveUID(_ uid: UInt32, from mailbox: String, to destinationMailbox: String) async throws -> UInt32? {
+        let dest = destinationMailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dest.isEmpty else { throw MailNetError.unexpected("Missing destination mailbox") }
+        if dest.caseInsensitiveCompare(mailbox) == .orderedSame { return uid }
+        _ = try await select(mailbox)
+        let moveLines = try await taggedLines("UID MOVE \(uid) \(quote(dest))", allowLiterals: false)
+        let moveJoined = moveLines.joined(separator: "\n")
+        if let last = moveLines.last, last.uppercased().contains(" OK") {
+            return parseCopyUIDDestination(from: moveJoined) ?? uid
+        }
+        // Fallback when MOVE unsupported: UID COPY then flag+expunge source.
+        let copyLines = try await taggedLines("UID COPY \(uid) \(quote(dest))", allowLiterals: false)
+        let copyJoined = copyLines.joined(separator: "\n")
+        guard let copyLast = copyLines.last, copyLast.uppercased().contains(" OK") else {
+            throw MailNetError.unexpected(copyJoined.isEmpty ? "UID COPY failed" : copyJoined)
+        }
+        let destUID = parseCopyUIDDestination(from: copyJoined)
+        let storeResp = try await tagged("UID STORE \(uid) +FLAGS (\\Deleted)")
+        guard storeResp.uppercased().contains(" OK") else {
+            throw MailNetError.unexpected(storeResp.isEmpty ? "UID STORE \\Deleted failed after COPY" : storeResp)
+        }
+        _ = try await tagged("EXPUNGE")
+        return destUID ?? uid
+    }
+
+    /// Add or remove \Seen / \Flagged on a UID in `mailbox`.
+    func setUIDFlags(_ uid: UInt32, mailbox: String, seen: Bool? = nil, flagged: Bool? = nil) async throws {
+        guard seen != nil || flagged != nil else { return }
+        _ = try await select(mailbox)
+        var ops: [String] = []
+        if let seen {
+            ops.append(seen ? "+FLAGS (\\Seen)" : "-FLAGS (\\Seen)")
+        }
+        if let flagged {
+            ops.append(flagged ? "+FLAGS (\\Flagged)" : "-FLAGS (\\Flagged)")
+        }
+        for op in ops {
+            let resp = try await tagged("UID STORE \(uid) \(op)")
+            guard resp.uppercased().contains(" OK") else {
+                throw MailNetError.unexpected(resp.isEmpty ? "UID STORE \(op) failed" : resp)
+            }
+        }
+    }
+
+    /// Parse UIDPLUS `COPYUID <uidvalidity> <source-set> <dest-set>` → last dest UID.
+    private func parseCopyUIDDestination(from response: String) -> UInt32? {
+        let upper = response.uppercased()
+        guard let range = upper.range(of: "COPYUID ") else { return nil }
+        let after = response[range.upperBound...]
+        let tokens = after.split(whereSeparator: { $0.isWhitespace || $0 == "]" }).map(String.init)
+        guard tokens.count >= 3 else { return nil }
+        let destSet = tokens[2]
+        let nums = destSet.split(whereSeparator: { !$0.isNumber }).compactMap { UInt32($0) }
+        return nums.last
+    }
+
     /// Resolve a trash mailbox from LIST (\\Trash / name heuristics), preferring Gmail's Trash.
     func resolveTrashMailbox(from listed: [IMAPFolderInfo]? = nil) async throws -> String? {
         let folders: [IMAPFolderInfo]

@@ -431,6 +431,73 @@ enum MicrosoftGraphMailService {
         }
     }
 
+    /// Move a message to another mail folder. Returns the Graph id after move
+    /// (may change when ImmutableId is not in effect).
+    @discardableResult
+    static func moveMessage(
+        accessToken: String,
+        graphMessageID: String,
+        destinationId: String
+    ) async throws -> String {
+        let trimmed = graphMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dest = destinationId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GraphError.unexpected("Missing Graph message id for move")
+        }
+        guard !dest.isEmpty else {
+            throw GraphError.unexpected("Missing destination folder id")
+        }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+        let data = try await postJSON(
+            path: "/me/messages/\(encoded)/move",
+            accessToken: accessToken,
+            body: ["destinationId": dest]
+        )
+        struct Moved: Decodable { var id: String? }
+        if let moved = try? JSONDecoder().decode(Moved.self, from: data),
+           let newID = moved.id?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !newID.isEmpty {
+            return newID
+        }
+        return trimmed
+    }
+
+    /// PATCH `isRead` so Sync does not revert local mark-read / mark-unread.
+    static func updateMessageRead(
+        accessToken: String,
+        graphMessageID: String,
+        isRead: Bool
+    ) async throws {
+        let trimmed = graphMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GraphError.unexpected("Missing Graph message id for read update")
+        }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+        _ = try await patchJSON(
+            path: "/me/messages/\(encoded)",
+            accessToken: accessToken,
+            body: ["isRead": isRead]
+        )
+    }
+
+    /// PATCH follow-up flag (`flagged` / `notFlagged`).
+    static func updateMessageFlag(
+        accessToken: String,
+        graphMessageID: String,
+        flagged: Bool
+    ) async throws {
+        let trimmed = graphMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GraphError.unexpected("Missing Graph message id for flag update")
+        }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+        _ = try await patchJSON(
+            path: "/me/messages/\(encoded)",
+            accessToken: accessToken,
+            body: ["flag": ["flagStatus": flagged ? "flagged" : "notFlagged"]]
+        )
+    }
+
     // MARK: - Send
 
     /// Sends via Graph. Uses mailbox identity of the signed-in `/me` user — never sets `from`

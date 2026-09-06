@@ -314,6 +314,71 @@ enum IMAPAccountSyncService {
         await imap.logout()
     }
 
+    /// Parse `provider|mailbox|uid` and MOVE into `destinationMailbox`.
+    /// Returns updated remoteID (`provider|dest|newUID`).
+    @discardableResult
+    static func moveRemoteMessage(
+        provider: MailIMAPProvider,
+        email: String,
+        password: String,
+        remoteID: String,
+        destinationMailbox: String
+    ) async throws -> String {
+        let parts = remoteID.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3 else {
+            throw MailNetError.unexpected("Bad IMAP remoteID for move")
+        }
+        let uidString = parts.last!
+        guard let uid = UInt32(uidString) else {
+            throw MailNetError.unexpected("Bad IMAP UID in remoteID")
+        }
+        let mailbox = parts.dropFirst().dropLast().joined(separator: "|")
+        guard !mailbox.isEmpty else {
+            throw MailNetError.unexpected("Missing mailbox in remoteID")
+        }
+        let dest = destinationMailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dest.isEmpty else {
+            throw MailNetError.unexpected("Missing destination mailbox")
+        }
+
+        let imap = SimpleIMAPClient()
+        try await imap.connect(host: provider.imapHost, port: provider.imapPort)
+        try await imap.login(email: email, password: password, stripSpaces: provider.stripPasswordSpaces)
+        let newUID = try await imap.moveUID(uid, from: mailbox, to: dest) ?? uid
+        await imap.logout()
+        return "\(provider.rawValue)|\(dest)|\(newUID)"
+    }
+
+    /// Parse `provider|mailbox|uid` and update \Seen / \Flagged on the server.
+    static func updateRemoteMessageFlags(
+        provider: MailIMAPProvider,
+        email: String,
+        password: String,
+        remoteID: String,
+        seen: Bool? = nil,
+        flagged: Bool? = nil
+    ) async throws {
+        guard seen != nil || flagged != nil else { return }
+        let parts = remoteID.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3 else {
+            throw MailNetError.unexpected("Bad IMAP remoteID for flag update")
+        }
+        let uidString = parts.last!
+        guard let uid = UInt32(uidString) else {
+            throw MailNetError.unexpected("Bad IMAP UID in remoteID")
+        }
+        let mailbox = parts.dropFirst().dropLast().joined(separator: "|")
+        guard !mailbox.isEmpty else {
+            throw MailNetError.unexpected("Missing mailbox in remoteID")
+        }
+
+        let imap = SimpleIMAPClient()
+        try await imap.connect(host: provider.imapHost, port: provider.imapPort)
+        try await imap.login(email: email, password: password, stripSpaces: provider.stripPasswordSpaces)
+        try await imap.setUIDFlags(uid, mailbox: mailbox, seen: seen, flagged: flagged)
+        await imap.logout()
+    }
+
     static func send(
         provider: MailIMAPProvider,
         email: String,

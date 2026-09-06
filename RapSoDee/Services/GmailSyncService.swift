@@ -69,6 +69,39 @@ enum GmailSyncService {
         )
     }
 
+    @discardableResult
+    static func moveRemoteMessage(
+        email: String,
+        password: String,
+        remoteID: String,
+        destinationMailbox: String
+    ) async throws -> String {
+        try await IMAPAccountSyncService.moveRemoteMessage(
+            provider: provider,
+            email: email,
+            password: password,
+            remoteID: remoteID,
+            destinationMailbox: destinationMailbox
+        )
+    }
+
+    static func updateRemoteMessageFlags(
+        email: String,
+        password: String,
+        remoteID: String,
+        seen: Bool? = nil,
+        flagged: Bool? = nil
+    ) async throws {
+        try await IMAPAccountSyncService.updateRemoteMessageFlags(
+            provider: provider,
+            email: email,
+            password: password,
+            remoteID: remoteID,
+            seen: seen,
+            flagged: flagged
+        )
+    }
+
     static func send(email: String, password: String, draft: ComposeDraft, signature: String?, signatureLogoPath: String? = nil) async throws {
         try await IMAPAccountSyncService.send(
             provider: provider,

@@ -142,7 +142,13 @@ final class DemoMailStore: MailStore {
 
     func markRead(_ id: UUID, read: Bool) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        let previous = messages[i].isRead
+        guard previous != read else { return }
         messages[i].isRead = read
+        persistMessageCache()
+        let message = messages[i]
+        let account = account(for: message.accountID)
+        Task { await self.updateReadOnServer(message, account: account, isRead: read) }
     }
 
     func toggleFlag(_ id: UUID, flagID: UUID?) {
@@ -158,6 +164,7 @@ final class DemoMailStore: MailStore {
 
     func setFlag(_ id: UUID, flagID: UUID?) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        let wasFlagged = messages[i].isFlagged
         if let flagID {
             messages[i].isFlagged = true
             messages[i].flagID = flagID
@@ -165,6 +172,14 @@ final class DemoMailStore: MailStore {
         } else {
             messages[i].isFlagged = false
             messages[i].flagID = nil
+        }
+        let nowFlagged = messages[i].isFlagged
+        persistMessageCache()
+        // Named local flags are RapSoDee-only; push Graph/IMAP \Flagged when star state changes.
+        if wasFlagged != nowFlagged {
+            let message = messages[i]
+            let account = account(for: message.accountID)
+            Task { await self.updateFlagOnServer(message, account: account, flagged: nowFlagged) }
         }
     }
 
@@ -179,12 +194,14 @@ final class DemoMailStore: MailStore {
 
     func archive(_ id: UUID) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        let destID: UUID
         if let dest = folders.first(where: { $0.kind == .archive && $0.accountID == messages[i].accountID }) {
-            messages[i].folderID = dest.id
+            destID = dest.id
         } else {
-            messages[i].folderID = archiveFolderID
+            destID = archiveFolderID
         }
-        messages[i].snoozeUntil = nil
+        // Reuse file() so Archive also hits Graph/IMAP (not local-only).
+        file(id, into: destID)
     }
 
     func deleteRecessed(_ id: UUID) {
@@ -243,6 +260,177 @@ final class DemoMailStore: MailStore {
         }
     }
 
+
+    /// Graph `/move` or IMAP MOVE after local file/archive. Updates `remoteID` when the server returns a new id.
+    private func moveMessageOnServer(messageID: UUID, destination: MailFolder, account: MailAccount?) async {
+        guard let account else { return }
+        guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        let message = messages[idx]
+        guard let remote = normalizedRemoteID(message.remoteID),
+              !remote.hasPrefix(Self.optimisticRemotePrefix) else { return }
+
+        if account.isLiveOffice365 {
+            guard let destID = graphDestinationID(for: destination) else {
+                office365LastError = "File failed: destination folder has no Graph id (Sync may revert)."
+                return
+            }
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: account.email
+                )
+                let newID = try await MicrosoftGraphMailService.moveMessage(
+                    accessToken: token,
+                    graphMessageID: remote,
+                    destinationId: destID
+                )
+                if let i = messages.firstIndex(where: { $0.id == messageID }) {
+                    if newID != remote {
+                        messages[i].remoteID = newID
+                    }
+                    persistMessageCache()
+                }
+                office365LastError = nil
+            } catch {
+                office365LastError = "File/move failed: \(error.localizedDescription). Local move kept — Sync may revert until retry."
+            }
+            return
+        }
+
+        if account.isLiveGmail {
+            guard let destMailbox = imapDestinationMailbox(for: destination, providerHint: .gmail) else {
+                gmailLastError = "File failed: destination folder has no IMAP mailbox (Sync may revert)."
+                return
+            }
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            do {
+                let newRemote = try await GmailSyncService.moveRemoteMessage(
+                    email: account.email,
+                    password: password,
+                    remoteID: remote,
+                    destinationMailbox: destMailbox
+                )
+                if let i = messages.firstIndex(where: { $0.id == messageID }) {
+                    messages[i].remoteID = newRemote
+                    persistMessageCache()
+                }
+                gmailLastError = nil
+            } catch {
+                gmailLastError = "File/move failed: \(error.localizedDescription). Local move kept — Sync may revert until retry."
+            }
+        }
+    }
+
+    private func updateReadOnServer(_ message: MailMessage, account: MailAccount?, isRead: Bool) async {
+        guard let account else { return }
+        guard let remote = normalizedRemoteID(message.remoteID),
+              !remote.hasPrefix(Self.optimisticRemotePrefix) else { return }
+
+        if account.isLiveOffice365 {
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: account.email
+                )
+                try await MicrosoftGraphMailService.updateMessageRead(
+                    accessToken: token,
+                    graphMessageID: remote,
+                    isRead: isRead
+                )
+                office365LastError = nil
+            } catch {
+                office365LastError = "Mark read failed: \(error.localizedDescription). Sync may revert."
+            }
+            return
+        }
+
+        if account.isLiveGmail {
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            do {
+                try await GmailSyncService.updateRemoteMessageFlags(
+                    email: account.email,
+                    password: password,
+                    remoteID: remote,
+                    seen: isRead
+                )
+                gmailLastError = nil
+            } catch {
+                gmailLastError = "Mark read failed: \(error.localizedDescription). Sync may revert."
+            }
+        }
+    }
+
+    private func updateFlagOnServer(_ message: MailMessage, account: MailAccount?, flagged: Bool) async {
+        guard let account else { return }
+        guard let remote = normalizedRemoteID(message.remoteID),
+              !remote.hasPrefix(Self.optimisticRemotePrefix) else { return }
+
+        if account.isLiveOffice365 {
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: account.email
+                )
+                try await MicrosoftGraphMailService.updateMessageFlag(
+                    accessToken: token,
+                    graphMessageID: remote,
+                    flagged: flagged
+                )
+                office365LastError = nil
+            } catch {
+                office365LastError = "Flag failed: \(error.localizedDescription). Sync may revert."
+            }
+            return
+        }
+
+        if account.isLiveGmail {
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            do {
+                try await GmailSyncService.updateRemoteMessageFlags(
+                    email: account.email,
+                    password: password,
+                    remoteID: remote,
+                    flagged: flagged
+                )
+                gmailLastError = nil
+            } catch {
+                gmailLastError = "Flag failed: \(error.localizedDescription). Sync may revert."
+            }
+        }
+    }
+
+    /// Graph destination: folder `remoteID`, else well-known name for standard kinds.
+    private func graphDestinationID(for folder: MailFolder) -> String? {
+        if let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !rid.isEmpty {
+            return rid
+        }
+        return MicrosoftGraphMailService.wellKnownGraphName(for: folder.kind)
+    }
+
+    /// IMAP destination mailbox name from folder `remoteID`, with Gmail archive fallback.
+    private func imapDestinationMailbox(for folder: MailFolder, providerHint: MailIMAPProvider) -> String? {
+        if let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !rid.isEmpty {
+            return rid
+        }
+        switch folder.kind {
+        case .inbox: return "INBOX"
+        case .archive:
+            // Gmail has no classic Archive mailbox — All Mail is the archived store.
+            return providerHint == .gmail ? "[Gmail]/All Mail" : "Archive"
+        case .trash:
+            return providerHint == .gmail ? "[Gmail]/Trash" : "Trash"
+        case .sent:
+            return providerHint == .gmail ? "[Gmail]/Sent Mail" : "Sent"
+        case .drafts:
+            return providerHint == .gmail ? "[Gmail]/Drafts" : "Drafts"
+        case .junk:
+            return providerHint == .gmail ? "[Gmail]/Spam" : "Junk"
+        default:
+            return nil
+        }
+    }
+
+
     func file(_ id: UUID, into folderID: UUID) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
         guard let dest = folders.first(where: { $0.id == folderID }) else { return }
@@ -250,8 +438,15 @@ final class DemoMailStore: MailStore {
         if let destAccount = dest.accountID, destAccount != messages[i].accountID {
             return
         }
+        let previousFolderID = messages[i].folderID
+        guard previousFolderID != folderID else { return }
         messages[i].folderID = folderID
         messages[i].snoozeUntil = nil
+        persistMessageCache()
+
+        let message = messages[i]
+        let account = account(for: message.accountID)
+        Task { await self.moveMessageOnServer(messageID: id, destination: dest, account: account) }
     }
 
     func snooze(_ id: UUID, until: Date) {
@@ -2742,9 +2937,8 @@ final class DemoMailStore: MailStore {
                     incoming.snoozeUntil = until
                     incoming.folderID = local.folderID
                 }
-                // Keep server read state from fetch; local read already matches if same id path.
+                // Keep local mark-read until Graph/IMAP PATCH lands.
                 if local.isRead && !incoming.isRead {
-                    // User may have marked read locally before server caught up — keep read.
                     incoming.isRead = true
                 }
                 // Preserve lazy-loaded / fuller local body over list/delta preview snippets.
