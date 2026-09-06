@@ -284,7 +284,13 @@ final class DemoMailStore: MailStore {
 
 
     /// Graph `/move` or IMAP MOVE after local file/archive. Updates `remoteID` when the server returns a new id.
-    private func moveMessageOnServer(messageID: UUID, destination: MailFolder, account: MailAccount?) async {
+    /// Pass `accessToken` when the caller already acquired one for a burst (bulk file).
+    private func moveMessageOnServer(
+        messageID: UUID,
+        destination: MailFolder,
+        account: MailAccount?,
+        accessToken: String? = nil
+    ) async {
         guard let account else { return }
         guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let message = messages[idx]
@@ -310,10 +316,15 @@ final class DemoMailStore: MailStore {
                 return
             }
             do {
-                let token = try await MSALAuthService.shared.acquireAccessToken(
-                    interactiveIfNeeded: false,
-                    loginHint: account.email
-                )
+                let token: String
+                if let accessToken, !accessToken.isEmpty {
+                    token = accessToken
+                } else {
+                    token = try await MSALAuthService.shared.acquireAccessToken(
+                        interactiveIfNeeded: false,
+                        loginHint: account.email
+                    )
+                }
                 let newID = try await MicrosoftGraphMailService.moveMessage(
                     accessToken: token,
                     graphMessageID: remote,
@@ -613,21 +624,67 @@ final class DemoMailStore: MailStore {
 
 
     func file(_ id: UUID, into folderID: UUID) {
-        guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        file([id], into: folderID)
+    }
+
+    /// Bulk file into one folder. Local moves apply immediately; server moves share one
+    /// Graph access token per account so multi-select drag does not N× Keychain-prompt.
+    func file(_ ids: [UUID], into folderID: UUID) {
+        guard !ids.isEmpty else { return }
         guard let dest = folders.first(where: { $0.id == folderID }) else { return }
-        // Cross-account filing is not supported (Gmail labels ≠ M365 folders).
-        if let destAccount = dest.accountID, destAccount != messages[i].accountID {
-            return
+
+        var movedIDs: [UUID] = []
+        var accountIDs = Set<UUID>()
+        for id in ids {
+            guard let i = messages.firstIndex(where: { $0.id == id }) else { continue }
+            // Cross-account filing is not supported (Gmail labels ≠ M365 folders).
+            if let destAccount = dest.accountID, destAccount != messages[i].accountID {
+                continue
+            }
+            let previousFolderID = messages[i].folderID
+            guard previousFolderID != folderID else { continue }
+            messages[i].folderID = folderID
+            messages[i].snoozeUntil = nil
+            movedIDs.append(id)
+            accountIDs.insert(messages[i].accountID)
         }
-        let previousFolderID = messages[i].folderID
-        guard previousFolderID != folderID else { return }
-        messages[i].folderID = folderID
-        messages[i].snoozeUntil = nil
+        guard !movedIDs.isEmpty else { return }
         persistMessageCache()
 
-        let message = messages[i]
-        let account = account(for: message.accountID)
-        Task { await self.moveMessageOnServer(messageID: id, destination: dest, account: account) }
+        let destination = dest
+        let idsToMove = movedIDs
+        Task {
+            // One token acquire per account for the whole burst.
+            var tokensByAccountEmail: [String: String] = [:]
+            for accountID in accountIDs {
+                guard let acct = self.account(for: accountID), acct.isLiveOffice365 else { continue }
+                let email = acct.email.lowercased()
+                if tokensByAccountEmail[email] != nil { continue }
+                do {
+                    let token = try await MSALAuthService.shared.acquireAccessToken(
+                        interactiveIfNeeded: false,
+                        loginHint: acct.email
+                    )
+                    tokensByAccountEmail[email] = token
+                } catch {
+                    // Individual moves will acquire/enqueue pending ops / surface auth.
+                    continue
+                }
+            }
+
+            // Sequential moves keep Graph happy and reuse the in-memory token.
+            for id in idsToMove {
+                guard let msg = self.messages.first(where: { $0.id == id }) else { continue }
+                let acct = self.account(for: msg.accountID)
+                let token = acct.map { tokensByAccountEmail[$0.email.lowercased()] } ?? nil
+                await self.moveMessageOnServer(
+                    messageID: id,
+                    destination: destination,
+                    account: acct,
+                    accessToken: token
+                )
+            }
+        }
     }
 
     func snooze(_ id: UUID, until: Date) {

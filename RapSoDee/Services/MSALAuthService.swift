@@ -209,7 +209,14 @@ final class MSALAuthService {
     /// Cancellation flag for device-code polling (safe to set from cancelPendingAuth off the main actor).
     nonisolated(unsafe) private var deviceCodeCancelled = false
     /// In-memory Graph access tokens from device-code / refresh, keyed by lowercased email.
-    private var deviceCodeAccessTokens: [String: String] = [:]
+    /// Valid tokens are reused so move/read/flag bursts do not re-hit Keychain on every call.
+    private struct CachedAccessToken {
+        let token: String
+        let expiresAt: Date
+    }
+    private var deviceCodeAccessTokens: [String: CachedAccessToken] = [:]
+    /// Skew so we refresh before the token actually dies (seconds).
+    private static let accessTokenExpirySkew: TimeInterval = 120
     private(set) var signedInUsername: String?
     private(set) var signedInDisplayName: String?
     /// All known signed-in Microsoft usernames (MSAL cache + device-code + remembered).
@@ -492,7 +499,8 @@ final class MSALAuthService {
                     }
                 }
                 if let resolvedEmail, !resolvedEmail.isEmpty {
-                    deviceCodeAccessTokens[resolvedEmail.lowercased()] = accessToken
+                    let expiresIn = tokenJSON["expires_in"] as? Int
+                    storeGraphAccessToken(accessToken, forEmail: resolvedEmail, expiresIn: expiresIn)
                     signedInUsername = resolvedEmail
                     MSALAppConfig.rememberSignedInEmail(resolvedEmail)
                 }
@@ -530,6 +538,12 @@ final class MSALAuthService {
         deviceCodeCancelled = false
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 
+        // Reuse in-memory Graph token while valid — avoids Keychain refresh on every move/read/flag.
+        if let cached = cachedGraphAccessToken(forEmail: loginHint)
+            ?? (loginHint == nil ? anyCachedGraphAccessToken() : nil) {
+            return cached
+        }
+
         if let application, let account = msalAccount(matching: loginHint) {
             do {
                 let silent = MSALSilentTokenParameters(scopes: MSALAppConfig.scopes, account: account)
@@ -537,6 +551,10 @@ final class MSALAuthService {
                 if let username = result.account.username {
                     signedInUsername = username
                     MSALAppConfig.rememberSignedInEmail(username)
+                    // MSAL silent still touches its own cache; keep a Graph token in-memory for bursts.
+                    storeGraphAccessToken(result.accessToken, forEmail: username, expiresIn: nil)
+                } else if let hint = loginHint {
+                    storeGraphAccessToken(result.accessToken, forEmail: hint, expiresIn: nil)
                 }
                 return result.accessToken
             } catch {
@@ -695,6 +713,45 @@ final class MSALAuthService {
 
     // MARK: - Device code helpers
 
+    /// Returns a still-valid cached Graph access token for this mailbox, if any.
+    private func cachedGraphAccessToken(forEmail email: String?) -> String? {
+        guard let raw = email?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        let lower = raw.lowercased()
+        guard let cached = deviceCodeAccessTokens[lower] else { return nil }
+        // expiresAt already includes skew applied at store time.
+        if cached.expiresAt > Date() {
+            return cached.token
+        }
+        deviceCodeAccessTokens.removeValue(forKey: lower)
+        return nil
+    }
+
+    /// Any still-valid cached Graph token (single-account / no-hint fallback).
+    private func anyCachedGraphAccessToken() -> String? {
+        let now = Date()
+        let expired = deviceCodeAccessTokens.compactMap { key, cached -> String? in
+            cached.expiresAt <= now ? key : nil
+        }
+        for key in expired {
+            deviceCodeAccessTokens.removeValue(forKey: key)
+        }
+        return deviceCodeAccessTokens.values.first(where: { $0.expiresAt > now })?.token
+    }
+
+    private func storeGraphAccessToken(_ token: String, forEmail email: String, expiresIn: Int?) {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return }
+        // Prefer server expires_in; MSAL silent has no expires_in → assume ~1h Graph default.
+        let rawTTL = expiresIn.map { TimeInterval($0) } ?? 3600
+        let ttl = max(180, rawTTL - Self.accessTokenExpirySkew)
+        deviceCodeAccessTokens[lower] = CachedAccessToken(
+            token: token,
+            expiresAt: Date().addingTimeInterval(ttl)
+        )
+    }
+
     private func clearDeviceCodeTokens(forEmail email: String) {
         let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         deviceCodeAccessTokens.removeValue(forKey: lower)
@@ -719,6 +776,15 @@ final class MSALAuthService {
         scopes: [String]? = nil
     ) async throws -> String? {
         let hint = emailHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Graph access tokens only (not SMTP scope override): serve memory cache before Keychain.
+        if scopes == nil {
+            if let hint, !hint.isEmpty, let cached = cachedGraphAccessToken(forEmail: hint) {
+                return cached
+            }
+            if hint == nil || hint?.isEmpty == true, let cached = anyCachedGraphAccessToken() {
+                return cached
+            }
+        }
         // Strict mailbox binding: a non-empty hint must only use that mailbox's refresh
         // (never Derek's token when asking for Callie).
         let candidates: [String] = {
@@ -752,12 +818,7 @@ final class MSALAuthService {
         }
 
         if refresh == nil {
-            if scopes == nil, let hint, let cached = deviceCodeAccessTokens[hint.lowercased()] {
-                return cached
-            }
-            if scopes == nil, hint == nil, let cached = deviceCodeAccessTokens.values.first {
-                return cached
-            }
+            // Cache already checked at top; nothing left without a refresh token.
             return nil
         }
         guard let refresh, let refreshKey else { return nil }
@@ -806,7 +867,8 @@ final class MSALAuthService {
         }
         if let resolvedEmail, !resolvedEmail.isEmpty {
             if scopes == nil {
-                deviceCodeAccessTokens[resolvedEmail.lowercased()] = accessToken
+                let expiresIn = json["expires_in"] as? Int
+                storeGraphAccessToken(accessToken, forEmail: resolvedEmail, expiresIn: expiresIn)
             }
             signedInUsername = resolvedEmail
             MSALAppConfig.rememberSignedInEmail(resolvedEmail)

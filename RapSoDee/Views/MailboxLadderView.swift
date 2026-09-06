@@ -473,13 +473,16 @@ struct MailboxLadderView: View {
             return false
         }
         // Defensive: only file messages that still match the drag account.
+        // Bulk path → one Graph token acquire for the whole multi-select drop.
         var filed: [UUID] = []
         for id in payload.messageIDs {
             if let message = store.messages.first(where: { $0.id == id }),
                message.accountID == payload.accountID {
-                store.file(id, into: folder.id)
                 filed.append(id)
             }
+        }
+        if !filed.isEmpty {
+            store.file(filed, into: folder.id)
         }
         dropTargetFolderID = nil
         mailDrag.end()

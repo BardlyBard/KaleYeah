@@ -22,6 +22,8 @@ protocol MailStore: AnyObject {
     func archive(_ id: UUID)
     func deleteRecessed(_ id: UUID)
     func file(_ id: UUID, into folderID: UUID)
+    /// Bulk file — acquires one Graph token per account then moves all (avoids N Keychain hits).
+    func file(_ ids: [UUID], into folderID: UUID)
     func snooze(_ id: UUID, until: Date)
     func unsnoozeDue()
 

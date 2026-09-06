@@ -82,9 +82,8 @@ struct ContentView: View {
             if let lead = fileTargets.first {
                 FilePickerSheet(message: lead) { folderID in
                     let account = lead.accountID
-                    for message in fileTargets where message.accountID == account {
-                        store.file(message.id, into: folderID)
-                    }
+                    let ids = fileTargets.filter { $0.accountID == account }.map(\.id)
+                    store.file(ids, into: folderID)
                     fileTargets = []
                 }
                 .environment(store)
