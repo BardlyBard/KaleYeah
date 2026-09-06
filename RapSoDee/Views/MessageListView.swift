@@ -223,6 +223,17 @@ struct MessageListView: View {
         for id in Array(selectedMessageIDs) {
             store.archive(id)
         }
+        clearBulkSelectionAfterMutation()
+    }
+
+    private func bulkDelete() {
+        for id in Array(selectedMessageIDs) {
+            store.deleteRecessed(id)
+        }
+        clearBulkSelectionAfterMutation()
+    }
+
+    private func clearBulkSelectionAfterMutation() {
         selectedMessageIDs = []
         selectedMessageID = messages.first?.id
         if let id = selectedMessageID { selectedMessageIDs = [id] }
@@ -300,8 +311,8 @@ struct MessageListView: View {
         Button("File…") { onFile(message) }
         Button("Snooze…") { onSnooze(message) }
         Button("Archive") { store.archive(message.id) }
-        // Standing rule: no Delete in multi-select; single still archives via Archive.
-        // Delete remains available only via existing recessed path elsewhere if needed — omit here for consistency with never-delete bulk rule.
+        Divider()
+        Button("Delete", role: .destructive) { store.deleteRecessed(message.id) }
     }
 
     @ViewBuilder
@@ -323,7 +334,8 @@ struct MessageListView: View {
             Button("File…") { bulkFile() }
         }
         Button("Archive") { bulkArchive() }
-        // No Delete — standing rule.
+        Divider()
+        Button("Delete", role: .destructive) { bulkDelete() }
     }
 
     @ViewBuilder
