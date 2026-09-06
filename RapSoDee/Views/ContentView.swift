@@ -44,7 +44,8 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environment(store)
-                .frame(minWidth: 520, minHeight: 420)
+                .frame(minWidth: 640, idealWidth: 720, maxWidth: 960,
+                       minHeight: 520, idealHeight: 700, maxHeight: 900)
                 .preferredColorScheme(.light)
         }
         .sheet(item: $fileTarget) { message in

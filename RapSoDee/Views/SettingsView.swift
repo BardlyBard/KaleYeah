@@ -80,7 +80,10 @@ struct SettingsView: View {
                 }
             }
         }
-        .frame(minWidth: 600, minHeight: 520)
+        // Sheet/Form on macOS often proposes a skinny ideal width; pin a usable size and allow resize.
+        .frame(minWidth: 640, idealWidth: 720, maxWidth: 960,
+               minHeight: 520, idealHeight: 700, maxHeight: 900)
+        .background(SettingsSheetWindowConfigurator())
         .preferredColorScheme(.light)
     }
 
@@ -932,6 +935,36 @@ struct SettingsView: View {
         } else if store.flags.isEmpty {
             store.flags = MailFlag.defaults
             syncFlagsToSwiftData()
+        }
+    }
+}
+
+
+/// Forces the Settings sheet's NSWindow to a usable size and marks it resizable.
+private struct SettingsSheetWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            Self.configure(window: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            Self.configure(window: nsView.window)
+        }
+    }
+
+    private static func configure(window: NSWindow?) {
+        guard let window else { return }
+        window.styleMask.insert(.resizable)
+        window.minSize = NSSize(width: 640, height: 520)
+        let ideal = NSSize(width: 720, height: 700)
+        let current = window.frame.size
+        // Only enlarge if the sheet opened too narrow/short (don't fight user resize).
+        if current.width < 640 || current.height < 480 {
+            window.setContentSize(ideal)
         }
     }
 }
