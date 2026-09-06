@@ -93,7 +93,7 @@ struct SettingsView: View {
                 msalClientID = MSALAppConfig.clientID
                 msalTenantID = MSALAppConfig.tenantID
                 preferSMTPSend = MSALAppConfig.preferSMTPSend
-                MSALAuthService.shared.refreshSignedInStateFromCache()
+                store.noteOffice365AuthStateChanged()
                 store.restoreOffice365AccountShellIfNeeded()
                 if store.office365Accounts().contains(where: {
                     $0.email.lowercased() == Office365Defaults.defaultEmail.lowercased()
@@ -357,6 +357,8 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func microsoftAccountRow(_ account: MailAccount) -> some View {
+        // Depend on auth revision so Sign in vs Sync updates per mailbox independently.
+        let signedIn = store.isOffice365SignedIn(email: account.email)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(Color(hex: account.tintHex)).frame(width: 10, height: 10)
@@ -371,7 +373,7 @@ struct SettingsView: View {
                                 .background(MuseTheme.approveSoft)
                                 .clipShape(Capsule())
                         }
-                        if !MSALAuthService.shared.isSignedIn(email: account.email) {
+                        if !signedIn {
                             Text("Needs sign-in")
                                 .font(.caption2.weight(.semibold))
                                 .padding(.horizontal, 6)
@@ -387,15 +389,10 @@ struct SettingsView: View {
                     ProgressView().controlSize(.small)
                 }
             }
+            // Per-account controls stay visible for every shell. Auth state is independent:
+            // Sign in… when THIS email has no valid token; Sync / Sign out only when it does.
             HStack(spacing: 10) {
-                if !MSALAuthService.shared.isSignedIn(email: account.email) {
-                    Button("Sign in…") {
-                        addMicrosoft365Hint = account.email
-                        showAddMicrosoft365 = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(office365Busy || store.office365IsSyncing)
-                } else {
+                if signedIn {
                     Button("Sync") {
                         Task {
                             office365Busy = true
@@ -405,18 +402,25 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(office365Busy || store.office365IsSyncing)
-                }
 
-                Button("Sign out", role: .destructive) {
-                    Task {
-                        office365Busy = true
-                        deviceCodePrompt = nil
-                        defer { office365Busy = false }
-                        await store.signOutMicrosoft365(accountID: account.id)
+                    Button("Sign out", role: .destructive) {
+                        Task {
+                            office365Busy = true
+                            deviceCodePrompt = nil
+                            defer { office365Busy = false }
+                            await store.signOutMicrosoft365(accountID: account.id)
+                        }
                     }
+                    .buttonStyle(.bordered)
+                    .disabled(office365Busy || store.office365IsSyncing)
+                } else {
+                    Button("Sign in…") {
+                        addMicrosoft365Hint = account.email
+                        showAddMicrosoft365 = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(office365Busy || store.office365IsSyncing)
                 }
-                .buttonStyle(.bordered)
-                .disabled(office365Busy || store.office365IsSyncing)
             }
         }
         .padding(.vertical, 2)
@@ -960,8 +964,11 @@ struct SettingsView: View {
 
 
     private var microsoftAccountsSummary: String {
-        let emails = store.office365Accounts().map(\.email)
-        return emails.isEmpty ? "none" : emails.joined(separator: ", ")
+        let rows = store.office365Accounts().map { account in
+            let state = store.isOffice365SignedIn(email: account.email) ? "signed in" : "needs sign-in"
+            return "\(account.email) (\(state))"
+        }
+        return rows.isEmpty ? "none" : rows.joined(separator: ", ")
     }
 
     private var gmailEmailTrimmed: String {

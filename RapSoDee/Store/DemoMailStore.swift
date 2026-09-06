@@ -31,6 +31,8 @@ final class DemoMailStore: MailStore {
     /// When the current M365 busy operation started (for Settings escape hatch).
     var office365SyncStartedAt: Date?
     var office365NeedsSetup: Bool = true
+    /// Bumped when per-mailbox MSAL/device-code auth changes so Settings re-renders Sign in vs Sync.
+    private(set) var office365AuthRevision: Int = 0
     var office365LastError: String?
     var emlImportProgress: EMLImportProgress?
     var emlImportIsRunning: Bool = false
@@ -1254,6 +1256,19 @@ final class DemoMailStore: MailStore {
         return accounts.first { $0.isLiveOffice365 && $0.email.lowercased() == lower }
     }
 
+
+    /// Re-read MSAL/device-code cache and publish so Settings shows Sign in vs Sync per mailbox.
+    func noteOffice365AuthStateChanged() {
+        MSALAuthService.shared.refreshSignedInStateFromCache()
+        office365AuthRevision += 1
+    }
+
+    /// Observable per-mailbox auth — never treat "any M365 signed in" as this email being signed in.
+    func isOffice365SignedIn(email: String) -> Bool {
+        _ = office365AuthRevision
+        return MSALAuthService.shared.isSignedIn(email: email)
+    }
+
     func restoreOffice365AccountShellIfNeeded() {
         var planned: [RememberedOffice365Account] = Office365SyncService.rememberedAccounts()
         // Known live mailboxes + anything MSAL/device-code still has tokens for.
@@ -1267,39 +1282,22 @@ final class DemoMailStore: MailStore {
         }
         for email in Self.uniqueEmailList(candidateEmails) {
             let lower = email.lowercased()
-            let isCallie = Self.isCalliopeEmail(email)
-            // Prefer shells when we still hold a token OR we previously remembered the account.
-            // Callie always gets a planned shell so she stays visible while re-auth is pending.
-            let hasToken = MSALAuthService.shared.isSignedIn(email: email)
-            let remembered = planned.contains(where: { $0.email.lowercased() == lower })
-                || MSALAppConfig.rememberedSignedInEmails.contains(where: { $0.lowercased() == lower })
-            guard isCallie || hasToken || remembered else { continue }
             if !planned.contains(where: { $0.email.lowercased() == lower }) {
                 planned.append(RememberedOffice365Account(email: email, id: UUID()))
             }
         }
-        // Always keep Callie's mailbox row — never hide her for missing token.
-        let callie = MSALAppConfig.calliopeEmail
-        if !planned.contains(where: { $0.email.lowercased() == callie.lowercased() }) {
-            planned.append(RememberedOffice365Account(email: callie, id: UUID()))
+        // Always keep Derek + Callie mailbox rows visible (re-auth must not hide controls).
+        for alwaysEmail in [Office365Defaults.defaultEmail, MSALAppConfig.calliopeEmail] {
+            let lower = alwaysEmail.lowercased()
+            if !planned.contains(where: { $0.email.lowercased() == lower }) {
+                planned.append(RememberedOffice365Account(email: alwaysEmail, id: UUID()))
+            }
         }
         guard !planned.isEmpty else {
             deduplicateLiveAccountShells()
             return
         }
         for remembered in planned {
-            if accounts.contains(where: { $0.isLiveOffice365 && $0.email.lowercased() == remembered.email.lowercased() }) {
-                _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
-                continue
-            }
-            let isCallie = Self.isCalliopeEmail(remembered.email)
-            // Only create a new shell when a token exists, the account was remembered, or it's Callie.
-            let hasToken = MSALAuthService.shared.isSignedIn(email: remembered.email)
-            let wasRemembered = Office365SyncService.rememberedAccounts()
-                .contains(where: { $0.email.lowercased() == remembered.email.lowercased() })
-                || MSALAppConfig.rememberedSignedInEmails
-                .contains(where: { $0.lowercased() == remembered.email.lowercased() })
-            guard isCallie || hasToken || wasRemembered else { continue }
             _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
         }
         deduplicateLiveAccountShells()
@@ -1525,6 +1523,7 @@ final class DemoMailStore: MailStore {
                 .first(where: { $0.email.lowercased() == email.lowercased() })?.id ?? UUID()
             _ = ensureOffice365Account(email: email, id: stableID)
             deduplicateLiveAccountShells()
+            noteOffice365AuthStateChanged()
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email)"
             office365IsSyncing = false
@@ -1621,6 +1620,7 @@ final class DemoMailStore: MailStore {
                 .first(where: { $0.email.lowercased() == emailLower })?.id ?? UUID()
             _ = ensureOffice365Account(email: email, id: stableID)
             deduplicateLiveAccountShells()
+            noteOffice365AuthStateChanged()
             office365NeedsSetup = false
             office365IsSyncing = false
             office365SyncStartedAt = nil
@@ -1637,6 +1637,7 @@ final class DemoMailStore: MailStore {
             }
             office365LastError = error.localizedDescription
             office365SyncStatus = "Device code sign-in failed"
+            noteOffice365AuthStateChanged()
         }
     }
 
@@ -1664,29 +1665,18 @@ final class DemoMailStore: MailStore {
             office365LastError = nil
             return
         }
-        var keepCallieShell = false
         for account in targets {
-            let isCallie = Self.isCalliopeEmail(account.email)
             await MSALAuthService.shared.signOut(email: account.email)
             KeychainCredentialStore.deletePassword(forEmail: account.email)
-            if isCallie {
-                // Keep Callie's mailbox row visible so she can re-auth without disappearing.
-                keepCallieShell = true
-                Office365SyncService.rememberAccount(email: account.email, id: account.id)
-                messages.removeAll { $0.accountID == account.id }
-            } else {
-                Office365SyncService.forgetAccount(email: account.email)
-                messages.removeAll { $0.accountID == account.id }
-                folders.removeAll { $0.accountID == account.id }
-                accounts.removeAll { $0.id == account.id }
-            }
+            // Keep every M365 shell visible so Sign in… stays available for re-auth.
+            Office365SyncService.rememberAccount(email: account.email, id: account.id)
+            messages.removeAll { $0.accountID == account.id }
         }
         for (idx, _) in accounts.enumerated() {
             accounts[idx].sortOrder = idx
         }
-        if keepCallieShell {
-            restoreOffice365AccountShellIfNeeded()
-        }
+        restoreOffice365AccountShellIfNeeded()
+        noteOffice365AuthStateChanged()
         office365NeedsSetup = office365Accounts().isEmpty
         office365SyncStatus = targets.count == 1
             ? "Signed out of \(targets[0].email)."
@@ -1813,6 +1803,7 @@ final class DemoMailStore: MailStore {
                         office365NeedsSetup = true
                         lastError = "Silent Microsoft token timed out for \(account.email). Use Sign in with device code."
                         statuses.append("\(account.email): sign-in expired")
+                        noteOffice365AuthStateChanged()
                     } else {
                         lastError = "Sync timed out after \(seconds)s for \(account.email)."
                         statuses.append("\(account.email): timed out")
@@ -1835,6 +1826,7 @@ final class DemoMailStore: MailStore {
                 let lower = detail.lowercased()
                 if Self.isSilentAuthFailure(error) || lower.contains("folders missing") || lower.contains("client id") {
                     office365NeedsSetup = true
+                    noteOffice365AuthStateChanged()
                 }
             }
         }

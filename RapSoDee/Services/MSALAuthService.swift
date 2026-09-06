@@ -158,6 +158,9 @@ enum MSALAppConfig {
         }
         return out
     }
+
+    /// Public alias for auth-state refresh helpers.
+    static func uniqueEmailsPublic(_ values: [String]) -> [String] { uniqueEmails(values) }
 }
 
 /// User-facing device-code prompt (copyable code + verification URL).
@@ -213,13 +216,15 @@ final class MSALAuthService {
     private(set) var signedInUsernames: [String] = []
 
     var isSignedIn: Bool {
-        !signedInUsernames.isEmpty || signedInUsername != nil || hasCachedAccount || hasAnyDeviceCodeRefreshToken
+        !signedInUsernames.isEmpty || hasCachedAccount || hasAnyDeviceCodeRefreshToken
     }
 
+    /// True only when THIS mailbox has a usable MSAL account or device-code refresh/access token.
+    /// Remembered shells / UserDefaults alone must never count as signed-in (Derek ≠ Callie).
     func isSignedIn(email: String) -> Bool {
         let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lower.isEmpty else { return false }
-        if signedInUsernames.contains(where: { $0.lowercased() == lower }) { return true }
+        if deviceCodeAccessTokens[lower] != nil { return true }
         if let application,
            let accounts = try? application.allAccounts(),
            accounts.contains(where: { ($0.username ?? "").lowercased() == lower }) {
@@ -241,16 +246,16 @@ final class MSALAuthService {
     }
 
     private func hasDeviceCodeRefreshToken(forEmail email: String) -> Bool {
-        let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: email)
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: lower)
         if KeychainCredentialStore.password(forEmail: key) != nil { return true }
-        // Legacy single slot only counts for the remembered / matching email.
-        if let legacy = KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount),
-           !legacy.isEmpty {
-            let remembered = MSALAppConfig.rememberedSignedInEmails
-            if remembered.isEmpty { return true }
-            let lower = email.lowercased()
-            return remembered.contains(where: { $0.lowercased() == lower })
-        }
+        // Legacy single-slot refresh is one mailbox only — never broadcast to every remembered email.
+        guard let legacy = KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount),
+              !legacy.isEmpty else { return false }
+        let remembered = MSALAppConfig.rememberedSignedInEmails.map { $0.lowercased() }
+        if remembered.count == 1, remembered[0] == lower { return true }
+        // Orphan legacy (no remembered list): only attribute when this is the sole known default.
+        if remembered.isEmpty, lower == Office365Defaults.defaultEmail.lowercased() { return true }
         return false
     }
 
@@ -292,13 +297,19 @@ final class MSALAuthService {
                 signedInDisplayName = first.accountClaims?["name"] as? String
             }
         }
-        for remembered in MSALAppConfig.rememberedSignedInEmails {
-            if !emails.contains(where: { $0.lowercased() == remembered.lowercased() }) {
-                emails.append(remembered)
+        // Device-code / remembered: only include emails that still hold a real token.
+        // Never mark Derek signed-in because Callie (or a remembered shell) exists.
+        var candidates = MSALAppConfig.rememberedSignedInEmails
+        candidates.append(contentsOf: deviceCodeAccessTokens.keys)
+        for candidate in MSALAppConfig.uniqueEmailsPublic(candidates) {
+            let lower = candidate.lowercased()
+            if emails.contains(where: { $0.lowercased() == lower }) { continue }
+            if deviceCodeAccessTokens[lower] != nil || hasDeviceCodeRefreshToken(forEmail: lower) {
+                emails.append(candidate)
             }
         }
-        signedInUsernames = emails
-        signedInUsername = emails.first ?? MSALAppConfig.rememberedSignedInEmail
+        signedInUsernames = MSALAppConfig.uniqueEmailsPublic(emails)
+        signedInUsername = signedInUsernames.first ?? MSALAppConfig.rememberedSignedInEmail
     }
 
     /// MSAL cached account matching login hint / email (case-insensitive).
@@ -774,6 +785,7 @@ final class MSALAuthService {
             if scopes == nil {
                 KeychainCredentialStore.deletePassword(forEmail: refreshKey)
                 if let hint { deviceCodeAccessTokens.removeValue(forKey: hint.lowercased()) }
+                refreshSignedInStateFromCache()
             }
             return nil
         }
