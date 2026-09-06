@@ -113,6 +113,33 @@ struct ComposeView: View {
         }
     }
 
+
+    /// One entry per mailbox email so the From picker never lists duplicates.
+    private var composeFromAccounts: [MailAccount] {
+        var seen = Set<String>()
+        var out: [MailAccount] = []
+        for account in store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            let key = account.email.lowercased()
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            out.append(account)
+        }
+        return out
+    }
+
+    private func composeFromLabel(_ account: MailAccount) -> String {
+        let who: String
+        if account.isCalliope || account.email.lowercased().contains("calliope") {
+            who = "Callie"
+        } else if account.isLiveGmail {
+            who = "Gmail"
+        } else if account.isLiveOffice365 {
+            who = account.name
+        } else {
+            who = account.name
+        }
+        return "\(who) — \(account.email)"
+    }
+
     private var isApproveEdit: Bool {
         if case .editDraft(let m) = draft.mode { return m.disposition == .pendingApproval }
         return false
@@ -120,13 +147,13 @@ struct ComposeView: View {
 
     private var form: some View {
         Form {
-            Picker("From", selection: $draft.fromAddress) {
-                ForEach(store.accounts) { account in
-                    Text("\(account.name) <\(account.email)>").tag(account.email)
+            Picker("From (whose email)", selection: $draft.fromAddress) {
+                ForEach(composeFromAccounts, id: \.id) { account in
+                    Text(composeFromLabel(account)).tag(account.email)
                 }
             }
             .onChange(of: draft.fromAddress) { _, newValue in
-                if let account = store.accounts.first(where: { $0.email == newValue }) {
+                if let account = store.accounts.first(where: { $0.email.lowercased() == newValue.lowercased() }) {
                     draft.accountID = account.id
                 }
             }

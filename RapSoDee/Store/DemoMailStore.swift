@@ -78,6 +78,7 @@ final class DemoMailStore: MailStore {
         office365SyncStartedAt = nil
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
+        deduplicateLiveAccountShells()
         loadMessageCacheFromDisk()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
         office365NeedsSetup = MSALAppConfig.rememberedSignedInEmails.isEmpty && Office365SyncService.rememberedAccounts().isEmpty
@@ -1247,18 +1248,102 @@ final class DemoMailStore: MailStore {
 
     func restoreOffice365AccountShellIfNeeded() {
         var planned: [RememberedOffice365Account] = Office365SyncService.rememberedAccounts()
-        for email in MSALAppConfig.rememberedSignedInEmails {
+        // Known live mailboxes + anything MSAL/device-code still has tokens for.
+        var candidateEmails = MSALAppConfig.rememberedSignedInEmails
+        candidateEmails.append(contentsOf: [
+            Office365Defaults.defaultEmail,
+            MSALAppConfig.calliopeEmail,
+        ])
+        for email in MSALAuthService.shared.signedInUsernames {
+            candidateEmails.append(email)
+        }
+        for email in Self.uniqueEmailList(candidateEmails) {
             let lower = email.lowercased()
+            // Prefer shells when we still hold a token OR we previously remembered the account.
+            let hasToken = MSALAuthService.shared.isSignedIn(email: email)
+            let remembered = planned.contains(where: { $0.email.lowercased() == lower })
+                || MSALAppConfig.rememberedSignedInEmails.contains(where: { $0.lowercased() == lower })
+            guard hasToken || remembered else { continue }
             if !planned.contains(where: { $0.email.lowercased() == lower }) {
                 planned.append(RememberedOffice365Account(email: email, id: UUID()))
             }
         }
-        guard !planned.isEmpty else { return }
+        guard !planned.isEmpty else {
+            deduplicateLiveAccountShells()
+            return
+        }
         for remembered in planned {
             if accounts.contains(where: { $0.isLiveOffice365 && $0.email.lowercased() == remembered.email.lowercased() }) {
                 continue
             }
+            // Only create a new shell when a token exists or the account was explicitly remembered.
+            let hasToken = MSALAuthService.shared.isSignedIn(email: remembered.email)
+            let wasRemembered = Office365SyncService.rememberedAccounts()
+                .contains(where: { $0.email.lowercased() == remembered.email.lowercased() })
+                || MSALAppConfig.rememberedSignedInEmails
+                .contains(where: { $0.lowercased() == remembered.email.lowercased() })
+            guard hasToken || wasRemembered else { continue }
             _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
+        }
+        deduplicateLiveAccountShells()
+    }
+
+    private static func uniqueEmailList(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in values {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted { out.append(trimmed) }
+        }
+        return out
+    }
+
+    /// Collapse duplicate live shells (same provider + email) so One Inbox / ladder show each once.
+    func deduplicateLiveAccountShells() {
+        var keepByKey: [String: UUID] = [:]
+        var removeIDs: [UUID] = []
+        for account in accounts.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            let provider: String
+            if account.isLiveGmail {
+                provider = "gmail"
+            } else if account.isLiveOffice365 {
+                provider = "m365"
+            } else {
+                continue
+            }
+            let key = provider + "|" + account.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let keep = keepByKey[key] {
+                if keep != account.id {
+                    removeIDs.append(account.id)
+                    // Re-home folders/messages onto the kept shell.
+                    for i in folders.indices where folders[i].accountID == account.id {
+                        folders[i].accountID = keep
+                    }
+                    for i in messages.indices where messages[i].accountID == account.id {
+                        messages[i].accountID = keep
+                    }
+                }
+            } else {
+                keepByKey[key] = account.id
+            }
+        }
+        guard !removeIDs.isEmpty else { return }
+        let removeSet = Set(removeIDs)
+        accounts.removeAll { removeSet.contains($0.id) }
+        // Drop folders that collided onto an identical remoteID under the kept account.
+        var seenFolder = Set<String>()
+        folders = folders.filter { folder in
+            guard let aid = folder.accountID else { return true }
+            let remote = folder.remoteID ?? folder.id.uuidString
+            let key = aid.uuidString + "|" + remote
+            if seenFolder.contains(key) { return false }
+            seenFolder.insert(key)
+            return true
+        }
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
         }
     }
 
@@ -1411,21 +1496,18 @@ final class DemoMailStore: MailStore {
         }
         do {
             // Bound interactive sign-in so a hung ASWebAuthenticationSession cannot spin forever.
-            _ = try await withOffice365SyncTimeout(seconds: 90) {
+            // Prefer the token returned by sign-in (bound to the account just consented).
+            let accessToken = try await withOffice365SyncTimeout(seconds: 90) {
                 try await MSALAuthService.shared.signIn(loginHint: loginHint)
             }
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
-            let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: loginHint)
-            }
-            try Task.checkCancellation()
-            guard generation == office365SyncGeneration else { return }
-            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: accessToken)
             guard generation == office365SyncGeneration else { return }
             let stableID = Office365SyncService.rememberedAccounts()
                 .first(where: { $0.email.lowercased() == email.lowercased() })?.id ?? UUID()
             _ = ensureOffice365Account(email: email, id: stableID)
+            deduplicateLiveAccountShells()
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email)"
             office365IsSyncing = false
@@ -1500,24 +1582,29 @@ final class DemoMailStore: MailStore {
             }
         }
         do {
-            _ = try await MSALAuthService.shared.signInWithDeviceCode(
+            // Use the device-code access token itself — do not re-acquire via MSAL cache,
+            // which previously returned Derek's token when Callie had no MSAL account yet.
+            let accessToken = try await MSALAuthService.shared.signInWithDeviceCode(
                 loginHint: loginHint,
                 onPrompt: onPrompt
             )
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
-            let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: loginHint)
+            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: accessToken)
+            guard generation == office365SyncGeneration else { return }
+            let hintLower = loginHint.lowercased()
+            let emailLower = email.lowercased()
+            if !hintLower.isEmpty, hintLower != emailLower {
+                office365LastError = "Device code signed in as \(email), but the hint was \(loginHint). Sign out of the other Microsoft session in the browser and try again for \(loginHint)."
+                office365SyncStatus = "Signed in as \(email) (hint was \(loginHint))"
+            } else {
+                office365SyncStatus = "Signed in as \(email) (device code)"
             }
-            try Task.checkCancellation()
-            guard generation == office365SyncGeneration else { return }
-            let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
-            guard generation == office365SyncGeneration else { return }
             let stableID = Office365SyncService.rememberedAccounts()
-                .first(where: { $0.email.lowercased() == email.lowercased() })?.id ?? UUID()
+                .first(where: { $0.email.lowercased() == emailLower })?.id ?? UUID()
             _ = ensureOffice365Account(email: email, id: stableID)
+            deduplicateLiveAccountShells()
             office365NeedsSetup = false
-            office365SyncStatus = "Signed in as \(email) (device code)"
             office365IsSyncing = false
             office365SyncStartedAt = nil
             await syncOffice365Now()

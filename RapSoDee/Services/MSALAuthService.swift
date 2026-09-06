@@ -302,14 +302,14 @@ final class MSALAuthService {
     }
 
     /// MSAL cached account matching login hint / email (case-insensitive).
+    /// When a hint is provided and no MSAL account matches, returns nil — never another mailbox
+    /// (device-code Callie must not silently use Derek's MSAL cache).
     private func msalAccount(matching loginHint: String?) -> MSALAccount? {
         guard let application, let accounts = try? application.allAccounts(), !accounts.isEmpty else {
             return nil
         }
         if let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !hint.isEmpty {
-            if let match = accounts.first(where: { ($0.username ?? "").lowercased() == hint }) {
-                return match
-            }
+            return accounts.first(where: { ($0.username ?? "").lowercased() == hint })
         }
         // No hint: prefer remembered primary, else first cached.
         if let primary = MSALAppConfig.rememberedSignedInEmail?.lowercased(),
@@ -708,10 +708,19 @@ final class MSALAuthService {
         scopes: [String]? = nil
     ) async throws -> String? {
         let hint = emailHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strict mailbox binding: a non-empty hint must only use that mailbox's refresh
+        // (never Derek's token when asking for Callie).
         let candidates: [String] = {
             var keys: [String] = []
             if let hint, !hint.isEmpty {
                 keys.append(MSALAppConfig.deviceCodeRefreshAccount(forEmail: hint))
+                // Legacy single-slot only when it is known to belong to this mailbox.
+                let remembered = MSALAppConfig.rememberedSignedInEmails.map { $0.lowercased() }
+                let lower = hint.lowercased()
+                if remembered.isEmpty || remembered == [lower] || (remembered.count == 1 && remembered[0] == lower) {
+                    keys.append(MSALAppConfig.deviceCodeRefreshAccount)
+                }
+                return keys
             }
             for email in MSALAppConfig.rememberedSignedInEmails {
                 let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: email)

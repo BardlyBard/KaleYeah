@@ -607,42 +607,78 @@ struct SettingsView: View {
 
     private var oneInboxSection: some View {
         Section {
-            Text("Unified Inbox — choose which accounts appear together.")
+            Text("Unified Inbox — one row per mailbox. Include / pin / reorder without duplicates.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ForEach(store.accounts) { account in
-                Toggle(isOn: Binding(
-                    get: { account.includeInUnifiedInbox },
-                    set: { store.setIncludeInUnifiedInbox(accountID: account.id, include: $0) }
-                )) {
-                    Label {
-                        VStack(alignment: .leading) {
-                            Text(account.name)
-                            Text(account.email).font(.caption).foregroundStyle(.secondary)
-                        }
-                    } icon: {
+            ForEach(uniqueAccountsForDisplay) { account in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
                         Circle().fill(Color(hex: account.tintHex)).frame(width: 10, height: 10)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(accountDisplayTitle(account))
+                                .font(.headline)
+                            Text(account.email)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer(minLength: 0)
+                        Button("Up") { moveAccount(account.id, -1) }
+                            .disabled(account.sortOrder == 0)
+                        Button("Down") { moveAccount(account.id, 1) }
+                            .disabled(account.sortOrder >= store.accounts.count - 1)
+                    }
+                    HStack(spacing: 16) {
+                        Toggle("Include in One Inbox", isOn: Binding(
+                            get: { account.includeInUnifiedInbox },
+                            set: { store.setIncludeInUnifiedInbox(accountID: account.id, include: $0) }
+                        ))
+                        .disabled(account.isCalliope)
+                        Toggle("Pin", isOn: Binding(
+                            get: { account.inboxPinned },
+                            set: { store.setInboxPinned(accountID: account.id, pinned: $0) }
+                        ))
                     }
                 }
-                .disabled(account.isCalliope)
-            }
-
-            ForEach(store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder })) { account in
-                HStack {
-                    Toggle("Pin \(account.name)", isOn: Binding(
-                        get: { account.inboxPinned },
-                        set: { store.setInboxPinned(accountID: account.id, pinned: $0) }
-                    ))
-                    Spacer()
-                    Button("Up") { moveAccount(account.id, -1) }
-                        .disabled(account.sortOrder == 0)
-                    Button("Down") { moveAccount(account.id, 1) }
-                        .disabled(account.sortOrder >= store.accounts.count - 1)
-                }
+                .padding(.vertical, 4)
             }
         } header: {
             Text("One Inbox")
         }
+    }
+
+    /// Deduped by live provider + email so Settings never lists the same mailbox twice.
+    private var uniqueAccountsForDisplay: [MailAccount] {
+        var seen = Set<String>()
+        var out: [MailAccount] = []
+        for account in store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+            let provider = account.isLiveGmail ? "gmail" : (account.isLiveOffice365 ? "m365" : "other")
+            let key = provider + "|" + account.email.lowercased() + "|" + account.id.uuidString
+            // Prefer first occurrence of provider+email; skip later duplicates.
+            let dedupeKey = provider + "|" + account.email.lowercased()
+            if account.isLiveGmail || account.isLiveOffice365 {
+                if seen.contains(dedupeKey) { continue }
+                seen.insert(dedupeKey)
+            } else {
+                if seen.contains(key) { continue }
+                seen.insert(key)
+            }
+            out.append(account)
+        }
+        return out
+    }
+
+    private func accountDisplayTitle(_ account: MailAccount) -> String {
+        if account.isCalliope || account.email.lowercased().contains("calliope") {
+            return account.name.lowercased().contains("call") ? account.name : "Calliope (\(account.name))"
+        }
+        if account.isLiveGmail {
+            return account.name == "Gmail" ? "Gmail" : "\(account.name) (Gmail)"
+        }
+        if account.isLiveOffice365 {
+            return account.name
+        }
+        return account.name
     }
 
     private var appearanceSection: some View {

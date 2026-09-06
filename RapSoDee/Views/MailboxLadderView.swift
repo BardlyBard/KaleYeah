@@ -169,15 +169,24 @@ struct MailboxLadderView: View {
                             Circle()
                                 .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
                         }
-                    Text(account.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(MuseTheme.ink)
-                        .lineLimit(1)
-                    if account.inboxPinned {
-                        Image(systemName: "pin.fill")
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(account.name)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(MuseTheme.ink)
+                                .lineLimit(1)
+                            if account.inboxPinned {
+                                Image(systemName: "pin.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(MuseTheme.leaf)
+                                    .help("Pinned into One Inbox")
+                            }
+                        }
+                        Text(account.email)
                             .font(.caption2)
-                            .foregroundStyle(MuseTheme.leaf)
-                            .help("Pinned into One Inbox")
+                            .foregroundStyle(MuseTheme.ink.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Spacer(minLength: 0)
                 }
