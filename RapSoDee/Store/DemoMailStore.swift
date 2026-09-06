@@ -972,18 +972,32 @@ final class DemoMailStore: MailStore {
         if gmailIsSyncing { return }
         gmailIsSyncing = true
         gmailLastError = nil
-        gmailSyncStatus = "Syncing Gmail…"
+        gmailSyncStatus = "Listing Gmail labels…"
         let previousIDs = Set(messages.filter { $0.accountID == account.id }.map(\.id))
         do {
-            let (fetched, _, result) = try await GmailSyncService.sync(
+            // Phase 1: LIST + upsert so the ladder shows labels immediately.
+            let listed = try await GmailSyncService.listFolders(email: account.email, password: password)
+            let labelTargets = upsertIMAPRemoteFolders(accountID: account.id, remoteFolders: listed)
+            if !labelTargets.isEmpty {
+                gmailSyncStatus = "Syncing Gmail… (\(labelTargets.count) labels)"
+                persistMessageCache()
+            } else {
+                gmailSyncStatus = "Syncing Gmail…"
+            }
+            // Prefer extras already on the ladder so message hydrate binds to sidebar UUIDs.
+            let extras = gmailExtraSyncTargets(accountID: account.id)
+            let (fetched, remoteFolders, result) = try await GmailSyncService.sync(
                 email: account.email,
                 password: password,
                 accountID: account.id,
-                folderIDs: folderIDs
+                folderIDs: folderIDs,
+                extraFolders: extras
             )
+            // Refresh ladder in case LIST during sync saw anything new.
+            _ = upsertIMAPRemoteFolders(accountID: account.id, remoteFolders: remoteFolders)
             // Incremental UID sync must not mark folders prunable (empty change set ≠ wipe).
             let synced: Set<UUID> = result.allowsFolderReplace
-                ? Set([folderIDs.inbox, folderIDs.sent, folderIDs.drafts])
+                ? Set([folderIDs.inbox, folderIDs.sent, folderIDs.drafts] + labelTargets.map(\.folderID))
                 : []
             let newOnes = upsertSyncedMessages(
                 accountID: account.id,
@@ -992,7 +1006,8 @@ final class DemoMailStore: MailStore {
                 previousIDs: previousIDs,
                 removedRemoteIDs: []
             )
-            gmailSyncStatus = result.status
+            let labelNote = labelTargets.isEmpty ? "" : " · \(labelTargets.count) labels"
+            gmailSyncStatus = result.status + labelNote
             gmailNeedsSetup = false
             for msg in newOnes.prefix(3) {
                 applyNotificationPolicy(for: msg)
@@ -1230,6 +1245,92 @@ final class DemoMailStore: MailStore {
 
         // Cap custom message sync so Sync stays inside the hard timeout.
         return Array(messageSyncTargets.prefix(8))
+    }
+
+
+    /// Extra Gmail IMAP mailboxes already on the ladder (Starred / Important / user labels).
+    private func gmailExtraSyncTargets(accountID: UUID) -> [(mailbox: String, folderID: UUID)] {
+        folders.compactMap { folder -> (String, UUID)? in
+            guard folder.accountID == accountID else { return nil }
+            guard folder.kind == .custom else { return nil }
+            guard let rid = folder.remoteID?.trimmingCharacters(in: .whitespacesAndNewlines), !rid.isEmpty else { return nil }
+            // Skip Graph-style well-known stubs accidentally left on a Gmail shell.
+            let lower = rid.lowercased()
+            if ["inbox", "sentitems", "archive", "drafts", "deleteditems", "junkemail"].contains(lower) {
+                return nil
+            }
+            return (rid, folder.id)
+        }
+    }
+
+    /// Upsert Gmail / IMAP LIST results into the ladder. Well-known map by kind; labels by mailbox remoteID.
+    /// Returns message-sync targets for Starred / Important / user labels (All Mail excluded).
+    @discardableResult
+    func upsertIMAPRemoteFolders(
+        accountID: UUID,
+        remoteFolders: [IMAPFolderInfo]
+    ) -> [(folderID: UUID, mailbox: String)] {
+        ensureStandardMailFolders(for: accountID, baseSort: -10)
+        var syncTargets: [(folderID: UUID, mailbox: String)] = []
+
+        // Stamp well-known IMAP mailbox names onto standard rows (Gmail: `[Gmail]/Sent Mail`, …).
+        for info in remoteFolders where info.isSelectable {
+            let kind = info.kind
+            guard kind != .custom else { continue }
+            if let idx = folders.firstIndex(where: { $0.accountID == accountID && $0.kind == kind }) {
+                folders[idx].remoteID = info.name
+                // Prefer friendly Gmail names on the ladder (Sent / Trash / Drafts).
+                if kind == .sent || kind == .trash || kind == .drafts {
+                    let nice = info.ladderName
+                    if !nice.isEmpty { folders[idx].name = nice }
+                }
+            }
+            // Spam stays optional / out of the account card (ladder filters `.junk`).
+        }
+
+        let usefulSystemLeaves: Set<String> = ["STARRED", "IMPORTANT"]
+        var nextSort = (folders.filter { $0.accountID == accountID }.map(\.sortOrder).max() ?? -10) + 1
+
+        for info in remoteFolders {
+            guard info.isSelectable, !info.isGmailAllMail else { continue }
+
+            let leaf = info.ladderName.uppercased()
+            let isUsefulSystem = info.isGmailSystemMailbox && usefulSystemLeaves.contains(leaf)
+            let isUserLabel = !info.isGmailSystemMailbox && info.kind == .custom
+            guard isUsefulSystem || isUserLabel else { continue }
+
+            let rid = info.name
+            let stableID = IMAPAccountSyncService.stableFolderID(accountID: accountID, mailbox: rid)
+
+            if let idx = folders.firstIndex(where: { $0.accountID == accountID && $0.remoteID == rid }) {
+                folders[idx].name = info.ladderName
+                syncTargets.append((folders[idx].id, rid))
+                continue
+            }
+            // Prefer stable id so first-sync message rows bind even before this upsert runs.
+            if let idx = folders.firstIndex(where: { $0.id == stableID }) {
+                folders[idx].name = info.ladderName
+                folders[idx].remoteID = rid
+                folders[idx].accountID = accountID
+                syncTargets.append((folders[idx].id, rid))
+                continue
+            }
+
+            let local = MailFolder(
+                id: stableID,
+                accountID: accountID,
+                name: info.ladderName,
+                kind: .custom,
+                sortOrder: nextSort,
+                isPinned: false,
+                remoteID: rid
+            )
+            nextSort += 1
+            folders.append(local)
+            syncTargets.append((local.id, rid))
+        }
+
+        return syncTargets
     }
 
     private static let recentImportKey = "rapSoDee.office365.recentImportFolderIDs"

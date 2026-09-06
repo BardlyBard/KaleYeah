@@ -39,13 +39,24 @@ enum GmailSyncService {
         try await IMAPAccountSyncService.testConnection(provider: provider, email: email, password: password)
     }
 
-    static func sync(email: String, password: String, accountID: UUID, folderIDs: GmailFolderIDs) async throws -> (messages: [MailMessage], remoteFolders: [IMAPFolderInfo], result: GmailSyncResult) {
+    static func listFolders(email: String, password: String) async throws -> [IMAPFolderInfo] {
+        try await IMAPAccountSyncService.listFolders(provider: provider, email: email, password: password)
+    }
+
+    static func sync(
+        email: String,
+        password: String,
+        accountID: UUID,
+        folderIDs: GmailFolderIDs,
+        extraFolders: [(mailbox: String, folderID: UUID)] = []
+    ) async throws -> (messages: [MailMessage], remoteFolders: [IMAPFolderInfo], result: GmailSyncResult) {
         try await IMAPAccountSyncService.sync(
             provider: provider,
             email: email,
             password: password,
             accountID: accountID,
-            folderIDs: folderIDs
+            folderIDs: folderIDs,
+            extraFolders: extraFolders
         )
     }
 
@@ -183,13 +194,20 @@ enum Office365SyncService {
         try await IMAPAccountSyncService.testConnection(provider: provider, email: email, password: password)
     }
 
-    static func sync(email: String, password: String, accountID: UUID, folderIDs: IMAPFolderIDs) async throws -> (messages: [MailMessage], remoteFolders: [IMAPFolderInfo], result: IMAPSyncResult) {
+    static func sync(
+        email: String,
+        password: String,
+        accountID: UUID,
+        folderIDs: IMAPFolderIDs,
+        extraFolders: [(mailbox: String, folderID: UUID)] = []
+    ) async throws -> (messages: [MailMessage], remoteFolders: [IMAPFolderInfo], result: IMAPSyncResult) {
         try await IMAPAccountSyncService.sync(
             provider: provider,
             email: email,
             password: password,
             accountID: accountID,
-            folderIDs: folderIDs
+            folderIDs: folderIDs,
+            extraFolders: extraFolders
         )
     }
 

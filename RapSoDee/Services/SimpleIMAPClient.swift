@@ -3,15 +3,77 @@ import Foundation
 struct IMAPFolderInfo: Hashable {
     var name: String
     var flags: [String]
+
+    /// IMAP `\Noselect` / `\NonExistent` — cannot SELECT (e.g. `[Gmail]` root).
+    var isSelectable: Bool {
+        let joined = flags.joined(separator: " ").uppercased()
+        return !joined.contains("\\NOSELECT") && !joined.contains("\\NONEXISTENT")
+    }
+
+    /// Ladder / picker label — strip Gmail’s `[Gmail]/` prefix; keep user-label paths.
+    var ladderName: String {
+        if name.hasPrefix("[Gmail]/") {
+            return String(name.dropFirst("[Gmail]/".count))
+        }
+        if name.hasPrefix("[Google Mail]/") {
+            return String(name.dropFirst("[Google Mail]/".count))
+        }
+        return name
+    }
+
+    /// True for Gmail’s giant All Mail virtual mailbox (usually skip message hydrate).
+    var isGmailAllMail: Bool {
+        let upper = name.uppercased()
+        return upper == "[GMAIL]/ALL MAIL" || upper == "[GOOGLE MAIL]/ALL MAIL" || upper == "ALL MAIL"
+    }
+
+    /// Gmail system label under `[Gmail]/…` (not a user label).
+    var isGmailSystemMailbox: Bool {
+        name.hasPrefix("[Gmail]/") || name.hasPrefix("[Google Mail]/")
+    }
+
     var kind: FolderKind {
         let upper = name.uppercased()
         let joined = flags.joined(separator: " ").uppercased()
+        let leaf = ladderName.uppercased()
+
         if upper == "INBOX" || joined.contains("\\INBOX") { return .inbox }
-        if joined.contains("\\SENT") || upper.contains("SENT") { return .sent }
-        if joined.contains("\\DRAFTS") || upper.contains("DRAFT") { return .drafts }
-        if joined.contains("\\TRASH") || upper.contains("TRASH") { return .trash }
-        if joined.contains("\\JUNK") || joined.contains("\\SPAM") || upper.contains("SPAM") || upper.contains("JUNK") { return .junk }
-        if joined.contains("\\ARCHIVE") || upper.contains("ARCHIVE") { return .archive }
+
+        // Prefer SPECIAL-USE / exact Gmail names — never substring-match "SENT" inside user labels.
+        if joined.contains("\\SENT")
+            || upper == "[GMAIL]/SENT MAIL"
+            || upper == "[GOOGLE MAIL]/SENT MAIL"
+            || leaf == "SENT" || leaf == "SENT MAIL" || leaf == "SENT ITEMS"
+            || upper == "SENT" || upper == "SENT MAIL" {
+            return .sent
+        }
+        if joined.contains("\\DRAFTS")
+            || upper == "[GMAIL]/DRAFTS"
+            || upper == "[GOOGLE MAIL]/DRAFTS"
+            || leaf == "DRAFTS" || leaf == "DRAFT"
+            || upper == "DRAFTS" {
+            return .drafts
+        }
+        if joined.contains("\\TRASH")
+            || upper == "[GMAIL]/TRASH"
+            || upper == "[GOOGLE MAIL]/TRASH"
+            || leaf == "TRASH" || leaf == "DELETED ITEMS" || leaf == "BIN"
+            || upper == "TRASH" {
+            return .trash
+        }
+        if joined.contains("\\JUNK") || joined.contains("\\SPAM")
+            || upper == "[GMAIL]/SPAM"
+            || upper == "[GOOGLE MAIL]/SPAM"
+            || leaf == "SPAM" || leaf == "JUNK" || leaf == "JUNK E-MAIL" || leaf == "JUNK EMAIL"
+            || upper == "SPAM" || upper == "JUNK" {
+            return .junk
+        }
+        if joined.contains("\\ARCHIVE")
+            || leaf == "ARCHIVE"
+            || upper == "ARCHIVE" {
+            return .archive
+        }
+        // Starred / Important stay `.custom` so they appear as Gmail labels in the ladder.
         return .custom
     }
 }
