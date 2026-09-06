@@ -80,7 +80,7 @@ final class DemoMailStore: MailStore {
         restoreOffice365AccountShellIfNeeded()
         loadMessageCacheFromDisk()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
-        office365NeedsSetup = MSALAppConfig.rememberedSignedInEmail == nil
+        office365NeedsSetup = MSALAppConfig.rememberedSignedInEmails.isEmpty && Office365SyncService.rememberedAccounts().isEmpty
     }
 
     func account(for id: UUID) -> MailAccount? { accounts.first { $0.id == id } }
@@ -917,7 +917,9 @@ final class DemoMailStore: MailStore {
         let hasGmail = gmailAccount().map { KeychainCredentialStore.hasCredentials(forEmail: $0.email) } ?? false
         await MSALAuthService.shared.refreshSignedInStateFromCache()
         let msalSignedIn = await MainActor.run { MSALAuthService.shared.isSignedIn }
-        let hasOffice = msalSignedIn || MSALAppConfig.rememberedSignedInEmail != nil || office365Account() != nil
+        let hasOffice = msalSignedIn
+            || !MSALAppConfig.rememberedSignedInEmails.isEmpty
+            || !office365Accounts().isEmpty
         guard hasGmail || hasOffice else { return }
 
         syncAllInFlight = true
@@ -930,7 +932,7 @@ final class DemoMailStore: MailStore {
             await syncGmailNow()
         }
         if hasOffice {
-            await syncOffice365Now()
+            await syncOffice365Now() // syncs every live Microsoft 365 mailbox
         }
     }
 
@@ -952,14 +954,14 @@ final class DemoMailStore: MailStore {
         }
         await MSALAuthService.shared.refreshSignedInStateFromCache()
         let msalSignedIn = await MainActor.run { MSALAuthService.shared.isSignedIn }
-        if msalSignedIn || MSALAppConfig.rememberedSignedInEmail != nil {
+        if msalSignedIn || !MSALAppConfig.rememberedSignedInEmails.isEmpty || !Office365SyncService.rememberedAccounts().isEmpty {
             restoreOffice365AccountShellIfNeeded()
-            office365NeedsSetup = false
+            office365NeedsSetup = office365Accounts().isEmpty
             await syncOffice365Now()
         } else {
             office365NeedsSetup = true
             if office365SyncStatus.isEmpty {
-                office365SyncStatus = "Optional: Sign in with Microsoft in Settings → Microsoft 365."
+                office365SyncStatus = "Optional: Add Microsoft 365 in Settings → Accounts."
             }
             persistOffice365SyncProbe(office365SyncStatus)
         }
@@ -1229,46 +1231,81 @@ final class DemoMailStore: MailStore {
 
     // MARK: - Live Microsoft 365 (MSAL + Graph)
 
+    func office365Accounts() -> [MailAccount] {
+        accounts.filter { $0.isLiveOffice365 }
+    }
+
+    /// Primary / first live Microsoft 365 account (back-compat). Prefer `office365Account(email:)`.
     func office365Account() -> MailAccount? {
-        accounts.first { $0.isLiveOffice365 }
+        office365Accounts().first
+    }
+
+    func office365Account(email: String) -> MailAccount? {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return accounts.first { $0.isLiveOffice365 && $0.email.lowercased() == lower }
     }
 
     func restoreOffice365AccountShellIfNeeded() {
-        if office365Account() != nil { return }
-        let email = MSALAppConfig.rememberedSignedInEmail
-            ?? Office365SyncService.storedEmail()
-            ?? Office365Defaults.defaultEmail
-        let id = Office365SyncService.storedAccountID() ?? UUID()
-        let signedIn = MSALAppConfig.rememberedSignedInEmail != nil
-        let remembered = Office365SyncService.storedEmail() != nil
-        guard signedIn || remembered else { return }
-        ensureOffice365Account(email: email, id: id)
+        var planned: [RememberedOffice365Account] = Office365SyncService.rememberedAccounts()
+        for email in MSALAppConfig.rememberedSignedInEmails {
+            let lower = email.lowercased()
+            if !planned.contains(where: { $0.email.lowercased() == lower }) {
+                planned.append(RememberedOffice365Account(email: email, id: UUID()))
+            }
+        }
+        guard !planned.isEmpty else { return }
+        for remembered in planned {
+            if accounts.contains(where: { $0.isLiveOffice365 && $0.email.lowercased() == remembered.email.lowercased() }) {
+                continue
+            }
+            _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
+        }
+    }
+
+    private static func isCalliopeEmail(_ email: String) -> Bool {
+        email.lowercased().contains("calliope")
     }
 
     @discardableResult
     func ensureOffice365Account(email: String, id: UUID = UUID()) -> MailAccount {
-        if let existing = office365Account() {
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        let isCallie = Self.isCalliopeEmail(trimmed)
+
+        // Match by email so adding Callie never overwrites Derek's shell.
+        if let existing = accounts.first(where: { $0.isLiveOffice365 && $0.email.lowercased() == lower }) {
             if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
-                accounts[i].email = email
+                accounts[i].email = trimmed
+                accounts[i].isCalliope = isCallie || accounts[i].isCalliope
                 if let override = MailDisplayNames.accountName(for: existing.id) {
                     accounts[i].name = override
-                } else if accounts[i].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    accounts[i].name = "Microsoft 365"
+                } else if accounts[i].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || accounts[i].name == "Microsoft 365" {
+                    accounts[i].name = isCallie ? "Calliope" : "Microsoft 365"
                 }
-                accounts[i].tintHex = accounts[i].tintHex.isEmpty ? Office365Defaults.tintHex : accounts[i].tintHex
+                if accounts[i].tintHex.isEmpty {
+                    accounts[i].tintHex = isCallie ? Office365Defaults.calliopeTintHex : Office365Defaults.tintHex
+                }
             }
-            ensureStandardMailFolders(for: existing.id, baseSort: -20)
-            Office365SyncService.rememberAccount(email: email, id: existing.id)
-            return accounts.first { $0.isLiveOffice365 }!
+            ensureStandardMailFolders(for: existing.id, baseSort: isCallie ? -15 : -20)
+            Office365SyncService.rememberAccount(email: trimmed, id: existing.id)
+            return accounts.first { $0.id == existing.id }!
         }
+
+        // Reuse stable id from persistence when present.
+        let stableID = Office365SyncService.rememberedAccounts()
+            .first(where: { $0.email.lowercased() == lower })?.id ?? id
+
         let account = MailAccount(
-            id: id,
-            name: "Microsoft 365",
-            email: email,
-            tintHex: Office365Defaults.tintHex,
-            signature: "Derek Brown\nKale Yeah Inspections",
+            id: stableID,
+            name: isCallie ? "Calliope" : "Microsoft 365",
+            email: trimmed,
+            tintHex: isCallie ? Office365Defaults.calliopeTintHex : Office365Defaults.tintHex,
+            signature: isCallie
+                ? "Calliope Voss\nKale Yeah Inspections"
+                : "Derek Brown\nKale Yeah Inspections",
             includeInUnifiedInbox: true,
-            isCalliope: false,
+            isCalliope: isCallie,
             sortOrder: -1,
             inboxPinned: true,
             isLiveGmail: false,
@@ -1276,46 +1313,64 @@ final class DemoMailStore: MailStore {
         )
         if let gmailIdx = accounts.firstIndex(where: { $0.isLiveGmail }) {
             accounts.insert(account, at: gmailIdx + 1)
+        } else if let lastM365 = accounts.lastIndex(where: { $0.isLiveOffice365 }) {
+            accounts.insert(account, at: lastM365 + 1)
         } else {
             accounts.insert(account, at: 0)
         }
         for (idx, _) in accounts.enumerated() {
             accounts[idx].sortOrder = idx
         }
-        let base = -20
-        let inbox = MailFolder(accountID: id, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true, remoteID: "inbox")
-        let sent = MailFolder(accountID: id, name: "Sent Items", kind: .sent, sortOrder: base + 1, remoteID: "sentitems")
-        let drafts = MailFolder(accountID: id, name: "Drafts", kind: .drafts, sortOrder: base + 2, remoteID: "drafts")
-        let archive = MailFolder(accountID: id, name: "Archive", kind: .archive, sortOrder: base + 3, remoteID: "archive")
-        let trash = MailFolder(accountID: id, name: "Deleted Items", kind: .trash, sortOrder: base + 4, remoteID: "deleteditems")
+        let base = isCallie ? -15 : -20
+        let inbox = MailFolder(accountID: stableID, name: "Inbox", kind: .inbox, sortOrder: base, isPinned: true, remoteID: "inbox")
+        let sent = MailFolder(accountID: stableID, name: "Sent Items", kind: .sent, sortOrder: base + 1, remoteID: "sentitems")
+        let drafts = MailFolder(accountID: stableID, name: "Drafts", kind: .drafts, sortOrder: base + 2, remoteID: "drafts")
+        let archive = MailFolder(accountID: stableID, name: "Archive", kind: .archive, sortOrder: base + 3, remoteID: "archive")
+        let trash = MailFolder(accountID: stableID, name: "Deleted Items", kind: .trash, sortOrder: base + 4, remoteID: "deleteditems")
         folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
-        Office365SyncService.rememberAccount(email: email, id: id)
+        Office365SyncService.rememberAccount(email: trimmed, id: stableID)
         applyPersistedDisplayNames()
-        return accounts.first { $0.id == id } ?? account
+        return accounts.first { $0.id == stableID } ?? account
     }
 
-    func removeOffice365Account() {
-        guard let account = office365Account() else {
+    func removeOffice365Account(accountID: UUID? = nil) {
+        let targets: [MailAccount]
+        if let accountID {
+            targets = accounts.filter { $0.isLiveOffice365 && $0.id == accountID }
+        } else {
+            targets = office365Accounts()
+        }
+        guard !targets.isEmpty else {
             Task { @MainActor in await MSALAuthService.shared.signOut() }
             office365NeedsSetup = true
             return
         }
-        KeychainCredentialStore.deletePassword(forEmail: account.email)
-        Office365SyncService.clearRememberedAccount()
-        messages.removeAll { $0.accountID == account.id }
-        folders.removeAll { $0.accountID == account.id }
-        accounts.removeAll { $0.id == account.id }
+        for account in targets {
+            KeychainCredentialStore.deletePassword(forEmail: account.email)
+            Office365SyncService.forgetAccount(email: account.email)
+            messages.removeAll { $0.accountID == account.id }
+            folders.removeAll { $0.accountID == account.id }
+            accounts.removeAll { $0.id == account.id }
+            Task { @MainActor in
+                await MSALAuthService.shared.signOut(email: account.email)
+            }
+        }
         for (idx, _) in accounts.enumerated() {
             accounts[idx].sortOrder = idx
         }
-        Task { @MainActor in await MSALAuthService.shared.signOut() }
-        office365NeedsSetup = true
-        office365SyncStatus = "Signed out of Microsoft 365."
+        office365NeedsSetup = office365Accounts().isEmpty
+        office365SyncStatus = targets.count == 1
+            ? "Signed out of \(targets[0].email)."
+            : "Signed out of Microsoft 365."
         office365LastError = nil
     }
 
-    /// Interactive MSAL sign-in, then Graph sync.
-    func signInMicrosoft365(clientIDOverride: String? = nil, tenantIDOverride: String? = nil) async {
+    /// Interactive MSAL sign-in, then Graph sync. Pass loginHint when adding a second mailbox (Callie).
+    func signInMicrosoft365(
+        clientIDOverride: String? = nil,
+        tenantIDOverride: String? = nil,
+        loginHint: String? = nil
+    ) async {
         if let override = clientIDOverride {
             MSALAppConfig.setClientIDOverride(override)
         }
@@ -1330,8 +1385,10 @@ final class DemoMailStore: MailStore {
         office365InFlightTask?.cancel()
         office365SyncGeneration += 1
         let generation = office365SyncGeneration
+        let hint = (loginHint?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? Office365Defaults.defaultEmail
         let work = Task { @MainActor in
-            await self.performSignInMicrosoft365(generation: generation)
+            await self.performSignInMicrosoft365(generation: generation, loginHint: hint)
         }
         office365InFlightTask = work
         await work.value
@@ -1340,11 +1397,11 @@ final class DemoMailStore: MailStore {
         }
     }
 
-    private func performSignInMicrosoft365(generation: Int) async {
+    private func performSignInMicrosoft365(generation: Int, loginHint: String) async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
-        office365SyncStatus = "Signing in with Microsoft…"
+        office365SyncStatus = "Signing in \(loginHint)…"
         defer {
             if generation == office365SyncGeneration {
                 office365IsSyncing = false
@@ -1355,18 +1412,20 @@ final class DemoMailStore: MailStore {
         do {
             // Bound interactive sign-in so a hung ASWebAuthenticationSession cannot spin forever.
             _ = try await withOffice365SyncTimeout(seconds: 90) {
-                try await MSALAuthService.shared.signIn(loginHint: Office365Defaults.defaultEmail)
+                try await MSALAuthService.shared.signIn(loginHint: loginHint)
             }
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
             let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: loginHint)
             }
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
             let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
             guard generation == office365SyncGeneration else { return }
-            _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
+            let stableID = Office365SyncService.rememberedAccounts()
+                .first(where: { $0.email.lowercased() == email.lowercased() })?.id ?? UUID()
+            _ = ensureOffice365Account(email: email, id: stableID)
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email)"
             office365IsSyncing = false
@@ -1392,10 +1451,11 @@ final class DemoMailStore: MailStore {
         }
     }
 
-    /// Device-code fallback when browser redirect hangs after Allow.
+    /// Device-code fallback (preferred for Add Microsoft 365…). Pass loginHint for Callie.
     func signInMicrosoft365WithDeviceCode(
         clientIDOverride: String? = nil,
         tenantIDOverride: String? = nil,
+        loginHint: String? = nil,
         onPrompt: @MainActor @escaping (MSALDeviceCodePrompt) -> Void
     ) async {
         if let override = clientIDOverride {
@@ -1412,8 +1472,10 @@ final class DemoMailStore: MailStore {
         office365InFlightTask?.cancel()
         office365SyncGeneration += 1
         let generation = office365SyncGeneration
+        let hint = (loginHint?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? Office365Defaults.defaultEmail
         let work = Task { @MainActor in
-            await self.performSignInMicrosoft365WithDeviceCode(generation: generation, onPrompt: onPrompt)
+            await self.performSignInMicrosoft365WithDeviceCode(generation: generation, loginHint: hint, onPrompt: onPrompt)
         }
         office365InFlightTask = work
         await work.value
@@ -1424,12 +1486,13 @@ final class DemoMailStore: MailStore {
 
     private func performSignInMicrosoft365WithDeviceCode(
         generation: Int,
+        loginHint: String,
         onPrompt: @MainActor @escaping (MSALDeviceCodePrompt) -> Void
     ) async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365LastError = nil
-        office365SyncStatus = "Starting device code sign-in…"
+        office365SyncStatus = "Starting device code for \(loginHint)…"
         defer {
             if generation == office365SyncGeneration {
                 office365IsSyncing = false
@@ -1438,19 +1501,21 @@ final class DemoMailStore: MailStore {
         }
         do {
             _ = try await MSALAuthService.shared.signInWithDeviceCode(
-                loginHint: Office365Defaults.defaultEmail,
+                loginHint: loginHint,
                 onPrompt: onPrompt
             )
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
             let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
+                try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: loginHint)
             }
             try Task.checkCancellation()
             guard generation == office365SyncGeneration else { return }
             let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
             guard generation == office365SyncGeneration else { return }
-            _ = ensureOffice365Account(email: email, id: Office365SyncService.storedAccountID() ?? UUID())
+            let stableID = Office365SyncService.rememberedAccounts()
+                .first(where: { $0.email.lowercased() == email.lowercased() })?.id ?? UUID()
+            _ = ensureOffice365Account(email: email, id: stableID)
             office365NeedsSetup = false
             office365SyncStatus = "Signed in as \(email) (device code)"
             office365IsSyncing = false
@@ -1471,7 +1536,7 @@ final class DemoMailStore: MailStore {
         }
     }
 
-    func signOutMicrosoft365() async {
+    func signOutMicrosoft365(accountID: UUID? = nil) async {
         office365IsSyncing = true
         office365SyncStartedAt = Date()
         office365SyncStatus = "Signing out…"
@@ -1479,19 +1544,37 @@ final class DemoMailStore: MailStore {
             office365IsSyncing = false
             office365SyncStartedAt = nil
         }
-        await MSALAuthService.shared.signOut()
-        if let account = office365Account() {
+        let targets: [MailAccount]
+        if let accountID {
+            targets = accounts.filter { $0.isLiveOffice365 && $0.id == accountID }
+        } else {
+            targets = office365Accounts()
+        }
+        if targets.isEmpty {
+            if accountID == nil {
+                await MSALAuthService.shared.signOut()
+                Office365SyncService.clearRememberedAccount()
+            }
+            office365NeedsSetup = office365Accounts().isEmpty
+            office365SyncStatus = "Signed out of Microsoft 365."
+            office365LastError = nil
+            return
+        }
+        for account in targets {
+            await MSALAuthService.shared.signOut(email: account.email)
             KeychainCredentialStore.deletePassword(forEmail: account.email)
+            Office365SyncService.forgetAccount(email: account.email)
             messages.removeAll { $0.accountID == account.id }
             folders.removeAll { $0.accountID == account.id }
             accounts.removeAll { $0.id == account.id }
-            for (idx, _) in accounts.enumerated() {
-                accounts[idx].sortOrder = idx
-            }
         }
-        Office365SyncService.clearRememberedAccount()
-        office365NeedsSetup = true
-        office365SyncStatus = "Signed out of Microsoft 365."
+        for (idx, _) in accounts.enumerated() {
+            accounts[idx].sortOrder = idx
+        }
+        office365NeedsSetup = office365Accounts().isEmpty
+        office365SyncStatus = targets.count == 1
+            ? "Signed out of \(targets[0].email)."
+            : "Signed out of Microsoft 365."
         office365LastError = nil
     }
 
@@ -1561,6 +1644,97 @@ final class DemoMailStore: MailStore {
             }
         }
 
+        // If no shells yet but MSAL has sessions, create shells from signed-in emails.
+        if office365Accounts().isEmpty {
+            do {
+                for email in MSALAuthService.shared.signedInUsernames {
+                    let token = try await withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
+                        try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false, loginHint: email)
+                    }
+                    let resolved = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
+                    _ = ensureOffice365Account(email: resolved)
+                }
+            } catch {
+                // Fall through — per-account loop may still recover via remembered shells.
+            }
+        }
+
+        let targets = office365Accounts()
+        guard !targets.isEmpty else {
+            office365NeedsSetup = true
+            office365LastError = "Sign in to Microsoft 365 first"
+            office365SyncStatus = "No Microsoft 365 accounts signed in"
+            return
+        }
+
+        var statuses: [String] = []
+        var lastError: String?
+        for account in targets {
+            guard generation == office365SyncGeneration, !Task.isCancelled else { return }
+            office365SyncStatus = "Syncing \(account.email)…"
+            persistOffice365SyncProbe(office365SyncStatus)
+            do {
+                let status = try await syncOneOffice365Account(account, generation: generation)
+                statuses.append("\(account.email): \(status)")
+            } catch is CancellationError {
+                if generation == office365SyncGeneration {
+                    office365SyncStatus = "Sync cancelled"
+                }
+                return
+            } catch let urlError as URLError where urlError.code == .cancelled {
+                if generation == office365SyncGeneration {
+                    office365SyncStatus = "Sync cancelled"
+                }
+                return
+            } catch let timeout as Office365SyncTimeoutError {
+                guard generation == office365SyncGeneration else { return }
+                switch timeout {
+                case .timedOut(let seconds):
+                    _ = MSALAuthService.cancelPendingAuth()
+                    syncAllInFlight = false
+                    isUniversalSyncing = false
+                    if seconds <= Int(Self.office365TokenTimeoutSeconds) + 1 {
+                        office365NeedsSetup = true
+                        lastError = "Silent Microsoft token timed out for \(account.email). Use Sign in with device code."
+                        statuses.append("\(account.email): sign-in expired")
+                    } else {
+                        lastError = "Sync timed out after \(seconds)s for \(account.email)."
+                        statuses.append("\(account.email): timed out")
+                    }
+                case .foldersMissing:
+                    office365NeedsSetup = true
+                    lastError = "Microsoft 365 folders missing for \(account.email) — Sign out, then Sign in with device code."
+                    statuses.append("\(account.email): folders missing")
+                }
+            } catch {
+                guard generation == office365SyncGeneration else { return }
+                if Self.isCancelLike(error) {
+                    office365SyncStatus = "Sync cancelled"
+                    return
+                }
+                let detail = error.localizedDescription
+                lastError = detail
+                let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
+                statuses.append("\(account.email): failed — \(short)")
+                let lower = detail.lowercased()
+                if Self.isSilentAuthFailure(error) || lower.contains("folders missing") || lower.contains("client id") {
+                    office365NeedsSetup = true
+                }
+            }
+        }
+
+        guard generation == office365SyncGeneration else { return }
+        office365SyncStatus = statuses.joined(separator: " · ")
+        persistOffice365SyncProbe(office365SyncStatus)
+        office365LastError = lastError
+        if lastError == nil {
+            office365NeedsSetup = false
+        }
+    }
+
+    /// Sync a single live Microsoft 365 mailbox using that account's token (never another mailbox's).
+    @discardableResult
+    private func syncOneOffice365Account(_ account: MailAccount, generation: Int) async throws -> String {
         do {
             struct SyncPayload: Sendable {
                 var email: String
@@ -1576,21 +1750,7 @@ final class DemoMailStore: MailStore {
             // Hard overall deadline — auto-stops so Cancel is never required for a hung spinner.
             let payload: SyncPayload = try await withOffice365SyncTimeout(seconds: Self.office365SyncTimeoutSeconds) {
                 try Task.checkCancellation()
-                if self.office365Account() == nil {
-                    let token = try await self.withOffice365SyncTimeout(seconds: Self.office365TokenTimeoutSeconds) {
-                        try await MSALAuthService.shared.acquireAccessToken(interactiveIfNeeded: false)
-                    }
-                    try Task.checkCancellation()
-                    guard generation == self.office365SyncGeneration else { throw CancellationError() }
-                    let email = try await MicrosoftGraphMailService.fetchSignedInEmail(accessToken: token)
-                    try Task.checkCancellation()
-                    guard generation == self.office365SyncGeneration else { throw CancellationError() }
-                    _ = self.ensureOffice365Account(email: email)
-                }
                 guard generation == self.office365SyncGeneration else { throw CancellationError() }
-                guard let account = self.office365Account() else {
-                    throw MSALAuthError.noAccount
-                }
                 guard let folderIDs = self.liveFolderIDs(for: account.id) else {
                     throw Office365SyncTimeoutError.foldersMissing
                 }
@@ -1648,7 +1808,7 @@ final class DemoMailStore: MailStore {
             }
 
             try Task.checkCancellation()
-            guard generation == office365SyncGeneration else { return }
+            guard generation == office365SyncGeneration else { throw CancellationError() }
             if payload.email.lowercased() != payload.accountEmailHint.lowercased() {
                 _ = ensureOffice365Account(email: payload.email, id: payload.accountID)
             }
@@ -1659,66 +1819,15 @@ final class DemoMailStore: MailStore {
                 previousIDs: payload.previousIDs,
                 removedRemoteIDs: payload.removedRemoteIDs
             )
-            office365SyncStatus = payload.status
-            persistOffice365SyncProbe(payload.status)
-            office365NeedsSetup = false
-            office365LastError = nil
             for msg in newOnes.prefix(3) {
                 applyNotificationPolicy(for: msg)
             }
             persistMessageCache()
-        } catch is CancellationError {
-            if generation == office365SyncGeneration {
-                office365SyncStatus = "Sync cancelled"
-            }
-        } catch let urlError as URLError where urlError.code == .cancelled {
-            if generation == office365SyncGeneration {
-                office365SyncStatus = "Sync cancelled"
-            }
-        } catch let timeout as Office365SyncTimeoutError {
-            guard generation == office365SyncGeneration else { return }
-            switch timeout {
-            case .timedOut(let seconds):
-                _ = MSALAuthService.cancelPendingAuth()
-                // Clear any universal toolbar busy that may still be awaiting this sync.
-                syncAllInFlight = false
-                isUniversalSyncing = false
-                if seconds <= Int(Self.office365TokenTimeoutSeconds) + 1 {
-                    office365NeedsSetup = true
-                    office365LastError = "Silent Microsoft token timed out. Use Settings → Sign in with device code."
-                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code"
-                } else {
-                    office365LastError = "Sync timed out after \(seconds)s. If this keeps happening, Sign in with device code."
-                    office365SyncStatus = "Sync timed out — try again"
-                }
-            case .foldersMissing:
-                office365NeedsSetup = true
-                office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
-                office365SyncStatus = "Sync failed — folders missing"
-            }
-        } catch {
-            guard generation == office365SyncGeneration else { return }
-            if Self.isCancelLike(error) {
-                office365SyncStatus = "Sync cancelled"
-                return
-            }
-            let detail = error.localizedDescription
-            office365LastError = detail
-            let short = detail.count > 280 ? String(detail.prefix(277)) + "…" : detail
-            office365SyncStatus = "Sync failed — \(short)"
-            let lower = detail.lowercased()
-            if Self.isSilentAuthFailure(error) || lower.contains("folders missing") || lower.contains("client id") {
-                office365NeedsSetup = true
-                if lower.contains("folders missing") {
-                    office365SyncStatus = "Sync failed — folders missing"
-                    office365LastError = "Microsoft 365 folders missing — try Sign out, then Sign in with device code."
-                } else {
-                    office365SyncStatus = "Microsoft sign-in expired — use Sign in with device code"
-                    office365LastError = "Silent token failed. Open Settings → Sign in with device code.\n\(short)"
-                }
-            }
+            return payload.status
         }
     }
+
+
 
 
     // MARK: - EML import (Microsoft 365)
@@ -1794,15 +1903,17 @@ final class DemoMailStore: MailStore {
             do {
                 var token: String
                 do {
+                    let hint = self.office365Account()?.email ?? Office365Defaults.defaultEmail
                     token = try await MSALAuthService.shared.acquireAccessToken(
                         interactiveIfNeeded: false,
-                        loginHint: Office365Defaults.defaultEmail
+                        loginHint: hint
                     )
                 } catch {
                     guard let onPrompt = onDeviceCodePrompt else { throw error }
+                    let hint = self.office365Account()?.email ?? Office365Defaults.defaultEmail
                     self.office365SyncStatus = "Sign-in expired — starting device code for EML import…"
                     token = try await MSALAuthService.shared.signInWithDeviceCode(
-                        loginHint: Office365Defaults.defaultEmail,
+                        loginHint: hint,
                         onPrompt: onPrompt
                     )
                 }

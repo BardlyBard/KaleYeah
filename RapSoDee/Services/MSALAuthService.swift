@@ -29,9 +29,20 @@ enum MSALAppConfig {
     static let clientIDDefaultsKey = "rapSoDee.msal.clientID"
     static let tenantIDDefaultsKey = "rapSoDee.msal.tenantID"
     static let signedInEmailKey = "rapSoDee.msal.signedInEmail"
+    /// Ordered list of signed-in Microsoft usernames (Derek + Calliope, etc.).
+    static let signedInEmailsKey = "rapSoDee.msal.signedInEmails"
     static let keychainGroup = "com.microsoft.identity.universalstorage"
-    /// Keychain account for device-code refresh token (service = local.rapsodee.mail).
+    /// Legacy single-slot device-code refresh (pre multi-account). Migrated on read.
     static let deviceCodeRefreshAccount = "msal.device-code.refresh"
+    static let deviceCodeRefreshPrefix = "msal.device-code.refresh."
+    /// Suggested second mailbox for Add Microsoft 365… (Callie).
+    static let calliopeEmail = "calliope.voss@kaleyeahinspections.com"
+
+    /// Per-email Keychain account for device-code refresh tokens.
+    static func deviceCodeRefreshAccount(forEmail email: String) -> String {
+        let normalized = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return deviceCodeRefreshPrefix + normalized
+    }
 
     /// Priority: UserDefaults override → Info.plist MSALClientID → baked-in defaultClientID.
     static var clientID: String {
@@ -80,6 +91,7 @@ enum MSALAppConfig {
         }
     }
 
+    /// Last-active / primary remembered email (kept for older call sites).
     static var rememberedSignedInEmail: String? {
         get { UserDefaults.standard.string(forKey: signedInEmailKey) }
         set {
@@ -89,6 +101,62 @@ enum MSALAppConfig {
                 UserDefaults.standard.removeObject(forKey: signedInEmailKey)
             }
         }
+    }
+
+    /// All remembered Microsoft usernames. Never collapses to a single slot.
+    static var rememberedSignedInEmails: [String] {
+        get {
+            if let arr = UserDefaults.standard.stringArray(forKey: signedInEmailsKey), !arr.isEmpty {
+                return Self.uniqueEmails(arr)
+            }
+            if let one = rememberedSignedInEmail, !one.isEmpty {
+                return [one]
+            }
+            return []
+        }
+        set {
+            let cleaned = Self.uniqueEmails(newValue)
+            if cleaned.isEmpty {
+                UserDefaults.standard.removeObject(forKey: signedInEmailsKey)
+                rememberedSignedInEmail = nil
+            } else {
+                UserDefaults.standard.set(cleaned, forKey: signedInEmailsKey)
+                rememberedSignedInEmail = cleaned.first
+            }
+        }
+    }
+
+    static func rememberSignedInEmail(_ email: String) {
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = rememberedSignedInEmails
+        let lower = trimmed.lowercased()
+        if let idx = list.firstIndex(where: { $0.lowercased() == lower }) {
+            list[idx] = trimmed
+        } else {
+            list.append(trimmed)
+        }
+        rememberedSignedInEmails = list
+        rememberedSignedInEmail = trimmed
+    }
+
+    static func forgetSignedInEmail(_ email: String) {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        rememberedSignedInEmails = rememberedSignedInEmails.filter { $0.lowercased() != lower }
+    }
+
+    private static func uniqueEmails(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in values {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                out.append(trimmed)
+            }
+        }
+        return out
     }
 }
 
@@ -137,13 +205,27 @@ final class MSALAuthService {
     private var interactiveInFlight = false
     /// Cancellation flag for device-code polling (safe to set from cancelPendingAuth off the main actor).
     nonisolated(unsafe) private var deviceCodeCancelled = false
-    /// In-memory access token from the latest device-code / refresh exchange.
-    private var deviceCodeAccessToken: String?
+    /// In-memory Graph access tokens from device-code / refresh, keyed by lowercased email.
+    private var deviceCodeAccessTokens: [String: String] = [:]
     private(set) var signedInUsername: String?
     private(set) var signedInDisplayName: String?
+    /// All known signed-in Microsoft usernames (MSAL cache + device-code + remembered).
+    private(set) var signedInUsernames: [String] = []
 
     var isSignedIn: Bool {
-        signedInUsername != nil || hasCachedAccount || hasDeviceCodeRefreshToken
+        !signedInUsernames.isEmpty || signedInUsername != nil || hasCachedAccount || hasAnyDeviceCodeRefreshToken
+    }
+
+    func isSignedIn(email: String) -> Bool {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return false }
+        if signedInUsernames.contains(where: { $0.lowercased() == lower }) { return true }
+        if let application,
+           let accounts = try? application.allAccounts(),
+           accounts.contains(where: { ($0.username ?? "").lowercased() == lower }) {
+            return true
+        }
+        return hasDeviceCodeRefreshToken(forEmail: lower)
     }
 
     private var hasCachedAccount: Bool {
@@ -151,8 +233,25 @@ final class MSALAuthService {
         return (try? application.allAccounts().isEmpty) == false
     }
 
-    private var hasDeviceCodeRefreshToken: Bool {
-        KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount) != nil
+    private var hasAnyDeviceCodeRefreshToken: Bool {
+        for email in MSALAppConfig.rememberedSignedInEmails {
+            if hasDeviceCodeRefreshToken(forEmail: email) { return true }
+        }
+        return KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount) != nil
+    }
+
+    private func hasDeviceCodeRefreshToken(forEmail email: String) -> Bool {
+        let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: email)
+        if KeychainCredentialStore.password(forEmail: key) != nil { return true }
+        // Legacy single slot only counts for the remembered / matching email.
+        if let legacy = KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount),
+           !legacy.isEmpty {
+            let remembered = MSALAppConfig.rememberedSignedInEmails
+            if remembered.isEmpty { return true }
+            let lower = email.lowercased()
+            return remembered.contains(where: { $0.lowercased() == lower })
+        }
+        return false
     }
 
     private init() {
@@ -181,19 +280,43 @@ final class MSALAuthService {
     }
 
     func refreshSignedInStateFromCache() {
-        guard let application else {
-            signedInUsername = MSALAppConfig.rememberedSignedInEmail
-            return
-        }
-        if let account = try? application.allAccounts().first {
-            signedInUsername = account.username
-            signedInDisplayName = account.accountClaims?["name"] as? String
-            if let username = account.username {
-                MSALAppConfig.rememberedSignedInEmail = username
+        var emails: [String] = []
+        if let application, let accounts = try? application.allAccounts() {
+            for account in accounts {
+                if let username = account.username?.trimmingCharacters(in: .whitespacesAndNewlines), !username.isEmpty {
+                    emails.append(username)
+                    MSALAppConfig.rememberSignedInEmail(username)
+                }
             }
-        } else if let remembered = MSALAppConfig.rememberedSignedInEmail {
-            signedInUsername = remembered
+            if let first = accounts.first {
+                signedInDisplayName = first.accountClaims?["name"] as? String
+            }
         }
+        for remembered in MSALAppConfig.rememberedSignedInEmails {
+            if !emails.contains(where: { $0.lowercased() == remembered.lowercased() }) {
+                emails.append(remembered)
+            }
+        }
+        signedInUsernames = emails
+        signedInUsername = emails.first ?? MSALAppConfig.rememberedSignedInEmail
+    }
+
+    /// MSAL cached account matching login hint / email (case-insensitive).
+    private func msalAccount(matching loginHint: String?) -> MSALAccount? {
+        guard let application, let accounts = try? application.allAccounts(), !accounts.isEmpty else {
+            return nil
+        }
+        if let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !hint.isEmpty {
+            if let match = accounts.first(where: { ($0.username ?? "").lowercased() == hint }) {
+                return match
+            }
+        }
+        // No hint: prefer remembered primary, else first cached.
+        if let primary = MSALAppConfig.rememberedSignedInEmail?.lowercased(),
+           let match = accounts.first(where: { ($0.username ?? "").lowercased() == primary }) {
+            return match
+        }
+        return accounts.first
     }
 
     /// Dismiss any orphan ASWebAuthenticationSession / embedded auth UI left from a failed handoff.
@@ -240,13 +363,15 @@ final class MSALAuthService {
             }
         }
 
-        // Prefer MSAL cache over any prior device-code session.
-        clearDeviceCodeTokens()
-        signedInUsername = result.account.username ?? loginHint
-        signedInDisplayName = result.account.accountClaims?["name"] as? String
-        if let username = signedInUsername {
-            MSALAppConfig.rememberedSignedInEmail = username
+        // Drop device-code tokens only for this mailbox — never wipe Derek when Callie signs in.
+        let signedEmail = result.account.username ?? loginHint
+        if let signedEmail {
+            clearDeviceCodeTokens(forEmail: signedEmail)
+            MSALAppConfig.rememberSignedInEmail(signedEmail)
         }
+        signedInUsername = signedEmail
+        signedInDisplayName = result.account.accountClaims?["name"] as? String
+        refreshSignedInStateFromCache()
         NSApp.activate(ignoringOtherApps: true)
         return result.accessToken
     }
@@ -335,19 +460,32 @@ final class MSALAuthService {
             if let http = tokenResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                let tokenJSON = try? JSONSerialization.jsonObject(with: tokenData) as? [String: Any],
                let accessToken = tokenJSON["access_token"] as? String {
+                let resolvedEmail: String? = {
+                    if let idToken = tokenJSON["id_token"] as? String,
+                       let email = Self.emailFromIDToken(idToken) {
+                        return email
+                    }
+                    return loginHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+                }()
                 if let refresh = tokenJSON["refresh_token"] as? String {
-                    try? KeychainCredentialStore.savePassword(refresh, forEmail: MSALAppConfig.deviceCodeRefreshAccount)
+                    if let resolvedEmail, !resolvedEmail.isEmpty {
+                        let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: resolvedEmail)
+                        try? KeychainCredentialStore.savePassword(refresh, forEmail: key)
+                        // Do not overwrite a different account's legacy slot.
+                        if MSALAppConfig.rememberedSignedInEmails.isEmpty
+                            || MSALAppConfig.rememberedSignedInEmails.map({ $0.lowercased() }) == [resolvedEmail.lowercased()] {
+                            try? KeychainCredentialStore.savePassword(refresh, forEmail: MSALAppConfig.deviceCodeRefreshAccount)
+                        }
+                    } else {
+                        try? KeychainCredentialStore.savePassword(refresh, forEmail: MSALAppConfig.deviceCodeRefreshAccount)
+                    }
                 }
-                deviceCodeAccessToken = accessToken
-                // Best-effort username from id_token claims.
-                if let idToken = tokenJSON["id_token"] as? String,
-                   let email = Self.emailFromIDToken(idToken) {
-                    signedInUsername = email
-                    MSALAppConfig.rememberedSignedInEmail = email
-                } else if let hint = loginHint {
-                    signedInUsername = hint
-                    MSALAppConfig.rememberedSignedInEmail = hint
+                if let resolvedEmail, !resolvedEmail.isEmpty {
+                    deviceCodeAccessTokens[resolvedEmail.lowercased()] = accessToken
+                    signedInUsername = resolvedEmail
+                    MSALAppConfig.rememberSignedInEmail(resolvedEmail)
                 }
+                refreshSignedInStateFromCache()
                 NSApp.activate(ignoringOtherApps: true)
                 return accessToken
             }
@@ -374,27 +512,31 @@ final class MSALAuthService {
     }
 
     /// Silent token (Keychain cache / device-code refresh). Optionally fall back to interactive.
+    /// Always pass `loginHint` when multiple Microsoft accounts are signed in so tokens do not cross.
     func acquireAccessToken(interactiveIfNeeded: Bool = false, loginHint: String? = nil) async throws -> String {
         rebuildApplicationIfPossible()
         // Prior Sync/Send timeout may have set this; clear so device-code refresh can run.
         deviceCodeCancelled = false
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 
-        if let application, let account = try? application.allAccounts().first {
+        if let application, let account = msalAccount(matching: loginHint) {
             do {
                 let silent = MSALSilentTokenParameters(scopes: MSALAppConfig.scopes, account: account)
                 let result = try await acquireTokenSilent(application: application, parameters: silent)
-                signedInUsername = result.account.username ?? signedInUsername
+                if let username = result.account.username {
+                    signedInUsername = username
+                    MSALAppConfig.rememberSignedInEmail(username)
+                }
                 return result.accessToken
             } catch {
                 if interactiveIfNeeded {
                     return try await signIn(loginHint: loginHint ?? account.username)
                 }
-                // Fall through to device-code refresh if present.
+                // Fall through to device-code refresh for this mailbox.
             }
         }
 
-        if let token = try await refreshDeviceCodeAccessTokenIfPossible() {
+        if let token = try await refreshDeviceCodeAccessTokenIfPossible(forEmail: loginHint) {
             return token
         }
 
@@ -410,11 +552,14 @@ final class MSALAuthService {
         deviceCodeCancelled = false
         guard MSALAppConfig.clientID.isEmpty == false else { throw MSALAuthError.missingClientID }
 
-        if let application, let account = try? application.allAccounts().first {
+        if let application, let account = msalAccount(matching: loginHint) {
             do {
                 let silent = MSALSilentTokenParameters(scopes: MSALAppConfig.smtpScopes, account: account)
                 let result = try await acquireTokenSilent(application: application, parameters: silent)
-                signedInUsername = result.account.username ?? signedInUsername
+                if let username = result.account.username {
+                    signedInUsername = username
+                    MSALAppConfig.rememberSignedInEmail(username)
+                }
                 return result.accessToken
             } catch {
                 if interactiveIfNeeded {
@@ -424,7 +569,10 @@ final class MSALAuthService {
             }
         }
 
-        if let token = try await refreshDeviceCodeAccessTokenIfPossible(scopes: MSALAppConfig.smtpScopes + ["offline_access"]) {
+        if let token = try await refreshDeviceCodeAccessTokenIfPossible(
+            forEmail: loginHint,
+            scopes: MSALAppConfig.smtpScopes + ["offline_access"]
+        ) {
             return token
         }
 
@@ -459,21 +607,43 @@ final class MSALAuthService {
         interactiveInFlight = true
         defer { interactiveInFlight = false }
         let result = try await acquireTokenInteractive(application: application, parameters: parameters)
-        signedInUsername = result.account.username ?? signedInUsername
-        if let username = signedInUsername {
-            MSALAppConfig.rememberedSignedInEmail = username
+        if let username = result.account.username ?? loginHint {
+            signedInUsername = username
+            MSALAppConfig.rememberSignedInEmail(username)
         }
+        refreshSignedInStateFromCache()
         return result.accessToken
+    }
+
+    /// Remove one Microsoft mailbox without signing the others out.
+    func signOut(email: String) async {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return }
+        clearDeviceCodeTokens(forEmail: lower)
+        if let application, let accounts = try? application.allAccounts() {
+            for account in accounts where (account.username ?? "").lowercased() == lower {
+                do { try application.remove(account) } catch {
+                    NSLog("MSAL signOut(\(lower)): \(error.localizedDescription)")
+                }
+            }
+        }
+        MSALAppConfig.forgetSignedInEmail(lower)
+        refreshSignedInStateFromCache()
+        if signedInUsername?.lowercased() == lower {
+            signedInUsername = signedInUsernames.first
+            signedInDisplayName = nil
+        }
     }
 
     func signOut() async {
         Self.cancelInteractiveSession()
         deviceCodeCancelled = true
-        clearDeviceCodeTokens()
+        clearAllDeviceCodeTokens()
         guard let application else {
             signedInUsername = nil
             signedInDisplayName = nil
-            MSALAppConfig.rememberedSignedInEmail = nil
+            signedInUsernames = []
+            MSALAppConfig.rememberedSignedInEmails = []
             return
         }
         do {
@@ -486,7 +656,8 @@ final class MSALAuthService {
         }
         signedInUsername = nil
         signedInDisplayName = nil
-        MSALAppConfig.rememberedSignedInEmail = nil
+        signedInUsernames = []
+        MSALAppConfig.rememberedSignedInEmails = []
     }
 
     /// Forward custom-scheme redirects into MSAL where supported, and bring RapSoDee forward.
@@ -513,15 +684,64 @@ final class MSALAuthService {
 
     // MARK: - Device code helpers
 
-    private func clearDeviceCodeTokens() {
-        deviceCodeAccessToken = nil
+    private func clearDeviceCodeTokens(forEmail email: String) {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        deviceCodeAccessTokens.removeValue(forKey: lower)
+        KeychainCredentialStore.deletePassword(forEmail: MSALAppConfig.deviceCodeRefreshAccount(forEmail: lower))
+        // Clear legacy slot only when it belongs to this mailbox (or is the sole remembered account).
+        let remembered = MSALAppConfig.rememberedSignedInEmails.map { $0.lowercased() }
+        if remembered.isEmpty || remembered == [lower] || remembered.contains(lower) && remembered.count == 1 {
+            KeychainCredentialStore.deletePassword(forEmail: MSALAppConfig.deviceCodeRefreshAccount)
+        }
+    }
+
+    private func clearAllDeviceCodeTokens() {
+        deviceCodeAccessTokens.removeAll()
+        for email in MSALAppConfig.rememberedSignedInEmails {
+            KeychainCredentialStore.deletePassword(forEmail: MSALAppConfig.deviceCodeRefreshAccount(forEmail: email))
+        }
         KeychainCredentialStore.deletePassword(forEmail: MSALAppConfig.deviceCodeRefreshAccount)
     }
 
-    private func refreshDeviceCodeAccessTokenIfPossible(scopes: [String]? = nil) async throws -> String? {
-        guard let refresh = KeychainCredentialStore.password(forEmail: MSALAppConfig.deviceCodeRefreshAccount) else {
-            return scopes == nil ? deviceCodeAccessToken : nil
+    private func refreshDeviceCodeAccessTokenIfPossible(
+        forEmail emailHint: String? = nil,
+        scopes: [String]? = nil
+    ) async throws -> String? {
+        let hint = emailHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates: [String] = {
+            var keys: [String] = []
+            if let hint, !hint.isEmpty {
+                keys.append(MSALAppConfig.deviceCodeRefreshAccount(forEmail: hint))
+            }
+            for email in MSALAppConfig.rememberedSignedInEmails {
+                let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: email)
+                if !keys.contains(key) { keys.append(key) }
+            }
+            keys.append(MSALAppConfig.deviceCodeRefreshAccount)
+            return keys
+        }()
+
+        var refresh: String?
+        var refreshKey: String?
+        for key in candidates {
+            if let value = KeychainCredentialStore.password(forEmail: key), !value.isEmpty {
+                refresh = value
+                refreshKey = key
+                break
+            }
         }
+
+        if refresh == nil {
+            if scopes == nil, let hint, let cached = deviceCodeAccessTokens[hint.lowercased()] {
+                return cached
+            }
+            if scopes == nil, hint == nil, let cached = deviceCodeAccessTokens.values.first {
+                return cached
+            }
+            return nil
+        }
+        guard let refresh, let refreshKey else { return nil }
+
         let clientID = MSALAppConfig.clientID
         let tenant = MSALAppConfig.tenantID
         let tokenURL = URL(string: "https://login.microsoftonline.com/\(tenant)/oauth2/v2.0/token")!
@@ -543,23 +763,29 @@ final class MSALAuthService {
               let accessToken = json["access_token"] as? String else {
             // Stale refresh or scope not consented — clear only when using default Graph scopes.
             if scopes == nil {
-                clearDeviceCodeTokens()
+                KeychainCredentialStore.deletePassword(forEmail: refreshKey)
+                if let hint { deviceCodeAccessTokens.removeValue(forKey: hint.lowercased()) }
             }
             return nil
         }
+        let resolvedEmail = (json["id_token"] as? String).flatMap(Self.emailFromIDToken) ?? hint
         if let newRefresh = json["refresh_token"] as? String {
-            try? KeychainCredentialStore.savePassword(newRefresh, forEmail: MSALAppConfig.deviceCodeRefreshAccount)
+            if let resolvedEmail, !resolvedEmail.isEmpty {
+                let key = MSALAppConfig.deviceCodeRefreshAccount(forEmail: resolvedEmail)
+                try? KeychainCredentialStore.savePassword(newRefresh, forEmail: key)
+            } else {
+                try? KeychainCredentialStore.savePassword(newRefresh, forEmail: refreshKey)
+            }
         }
-        if scopes == nil {
-            deviceCodeAccessToken = accessToken
-        }
-        if let idToken = json["id_token"] as? String, let email = Self.emailFromIDToken(idToken) {
-            signedInUsername = email
-            MSALAppConfig.rememberedSignedInEmail = email
+        if let resolvedEmail, !resolvedEmail.isEmpty {
+            if scopes == nil {
+                deviceCodeAccessTokens[resolvedEmail.lowercased()] = accessToken
+            }
+            signedInUsername = resolvedEmail
+            MSALAppConfig.rememberSignedInEmail(resolvedEmail)
         }
         return accessToken
     }
-
 
     nonisolated private static func formURLEncoded(_ items: [URLQueryItem]) -> String {
         items.compactMap { item -> String? in
