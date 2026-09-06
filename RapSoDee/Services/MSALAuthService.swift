@@ -781,11 +781,17 @@ final class MSALAuthService {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["access_token"] as? String else {
-            // Stale refresh or scope not consented — clear only when using default Graph scopes.
+            // Only wipe the refresh token on definitive auth failures. Transient network /
+            // server / rate-limit errors must keep the token so a later retry can succeed —
+            // deleting on every failure forces a full device-code login and Keychain prompts.
             if scopes == nil {
-                KeychainCredentialStore.deletePassword(forEmail: refreshKey)
-                if let hint { deviceCodeAccessTokens.removeValue(forKey: hint.lowercased()) }
-                refreshSignedInStateFromCache()
+                let code = (Self.oauthErrorCode(from: data) ?? "").lowercased()
+                let definitiveInvalid = code == "invalid_grant" || code == "interaction_required"
+                if definitiveInvalid {
+                    KeychainCredentialStore.deletePassword(forEmail: refreshKey)
+                    if let hint { deviceCodeAccessTokens.removeValue(forKey: hint.lowercased()) }
+                    refreshSignedInStateFromCache()
+                }
             }
             return nil
         }

@@ -7,16 +7,34 @@ enum KeychainCredentialStore {
     /// Pre–Microsoft 365 service name; still read for Gmail credentials saved earlier.
     private static let legacyGmailService = "local.rapsodee.mail.gmail"
 
+    /// Updates the password in place when the item already exists so Keychain Access
+    /// Control (Always Allow / ACL) is preserved. Only SecItemAdd when missing —
+    /// never delete-then-add, which recreates the item with default Confirm prompts.
     static func savePassword(_ password: String, forEmail email: String) throws {
         let account = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let data = Data(password.utf8)
-        deletePassword(forEmail: email)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        // Value-only update preserves existing ACL / accessibility / access control.
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.unhandled(updateStatus)
+        }
         let add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else {
