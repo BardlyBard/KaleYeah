@@ -942,29 +942,33 @@ struct SettingsView: View {
 
 /// Forces the Settings sheet's NSWindow to a usable size and marks it resizable.
 private struct SettingsSheetWindowConfigurator: NSViewRepresentable {
+    final class Coordinator {
+        var didApplyIdealSize = false
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
-            Self.configure(window: view.window)
+            Self.configure(window: view.window, coordinator: context.coordinator)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            Self.configure(window: nsView.window)
+            Self.configure(window: nsView.window, coordinator: context.coordinator)
         }
     }
 
-    private static func configure(window: NSWindow?) {
+    private static func configure(window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
         window.styleMask.insert(.resizable)
         window.minSize = NSSize(width: 640, height: 520)
+        guard !coordinator.didApplyIdealSize else { return }
         let ideal = NSSize(width: 720, height: 700)
-        let current = window.frame.size
-        // Only enlarge if the sheet opened too narrow/short (don't fight user resize).
-        if current.width < 640 || current.height < 480 {
-            window.setContentSize(ideal)
-        }
+        window.setContentSize(ideal)
+        coordinator.didApplyIdealSize = true
     }
 }

@@ -65,6 +65,9 @@ struct ContentView: View {
         }
         .onAppear {
             hydrateFlagsIfNeeded()
+            if ProcessInfo.processInfo.arguments.contains("--open-settings") {
+                showSettings = true
+            }
             // Demo removal can leave a stale folder UUID selected — snap back to Unified Inbox.
             if !store.isValidSelection(selection) {
                 selection = .unifiedInbox
