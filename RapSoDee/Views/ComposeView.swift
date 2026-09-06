@@ -34,17 +34,26 @@ struct ComposeView: View {
                 )
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
-            if let logoPath = store.account(for: draft.accountID)?.signatureLogoPath,
+            if let account = store.account(for: draft.accountID),
+               let logoPath = account.signatureLogoPath,
                let data = AttachmentStore.load(path: logoPath),
                let image = NSImage(data: data) {
-                HStack(spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(maxHeight: 48)
-                    Text("Signature logo (included on send)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .frame(maxHeight: 56)
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !account.signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(account.signature)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                        }
+                        Text("Signature (logo + name — once on send)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)
@@ -132,6 +141,20 @@ struct ComposeView: View {
                 ComposeSession.shared.update(newValue)
             }
         }
+        .onAppear {
+            healSignatureOnce()
+        }
+    }
+
+    /// Strip stacked / mismatched trailing signatures so the editor shows at most one.
+    private func healSignatureOnce() {
+        let account = store.account(for: draft.accountID)
+            ?? store.accounts.first { $0.email.lowercased() == draft.fromAddress.lowercased() }
+        draft.body = MailSignatureFormatting.appendPlainIfNeeded(
+            body: draft.body,
+            signature: account?.signature,
+            logoPath: account?.signatureLogoPath
+        )
     }
 
 
@@ -198,7 +221,8 @@ struct ComposeView: View {
                     draft.body = MailSignatureFormatting.replaceSignature(
                         in: draft.body,
                         old: oldAccount?.signature,
-                        new: account.signature
+                        new: account.signature,
+                        newLogoPath: account.signatureLogoPath
                     )
                 }
             }

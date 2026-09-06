@@ -285,7 +285,10 @@ struct ContentView: View {
                     accountID: UUID()
                 )
             }
-            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
+            let sig = MailSignatureFormatting.composeInsertion(
+                signature: account.signature,
+                logoPath: account.signatureLogoPath
+            )
             return ComposeDraft(
                 mode: .new,
                 fromAddress: account.email,
@@ -296,59 +299,77 @@ struct ContentView: View {
                 accountID: account.id
             )
         case .reply(let message):
-            let account = store.account(for: message.accountID) ?? store.accounts.first!
             let from = message.deliveredTo
-            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
+            let accountID = accountForDelivery(from) ?? message.accountID
+            let account = store.account(for: accountID) ?? store.account(for: message.accountID) ?? store.accounts.first!
+            let sig = MailSignatureFormatting.composeInsertion(
+                signature: account.signature,
+                logoPath: account.signatureLogoPath
+            )
             return ComposeDraft(
                 mode: mode,
-                fromAddress: from,
+                fromAddress: account.email,
                 to: message.fromAddress,
                 cc: "",
                 subject: subjectByPrefixing(message.subject, "Re:"),
                 body: "\n\nOn \(message.receivedAt.formatted()), \(message.fromName) wrote:\n> "
                     + message.body.replacingOccurrences(of: "\n", with: "\n> ")
                     + sig,
-                accountID: accountForDelivery(from) ?? message.accountID
+                accountID: account.id
             )
         case .replyAll(let message):
-            let account = store.account(for: message.accountID) ?? store.accounts.first!
             let from = message.deliveredTo
+            let accountID = accountForDelivery(from) ?? message.accountID
+            let account = store.account(for: accountID) ?? store.account(for: message.accountID) ?? store.accounts.first!
             var recipients = ([message.fromAddress] + message.toAddresses + message.ccAddresses)
-                .filter { $0.lowercased() != from.lowercased() }
+                .filter { $0.lowercased() != account.email.lowercased() }
             recipients = Array(Set(recipients)).sorted()
-            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
+            let sig = MailSignatureFormatting.composeInsertion(
+                signature: account.signature,
+                logoPath: account.signatureLogoPath
+            )
             return ComposeDraft(
                 mode: mode,
-                fromAddress: from,
+                fromAddress: account.email,
                 to: recipients.joined(separator: ", "),
                 cc: "",
                 subject: subjectByPrefixing(message.subject, "Re:"),
                 body: "\n\nOn \(message.receivedAt.formatted()), \(message.fromName) wrote:\n> "
                     + message.body.replacingOccurrences(of: "\n", with: "\n> ")
                     + sig,
-                accountID: accountForDelivery(from) ?? message.accountID
+                accountID: account.id
             )
         case .forward(let message):
             let from = message.deliveredTo
-            let account = store.account(for: accountForDelivery(from) ?? message.accountID) ?? store.accounts.first
-            let sig = MailSignatureFormatting.plainBlock(signature: account?.signature)
+            let accountID = accountForDelivery(from) ?? message.accountID
+            let account = store.account(for: accountID) ?? store.accounts.first
+            let sig = MailSignatureFormatting.composeInsertion(
+                signature: account?.signature,
+                logoPath: account?.signatureLogoPath
+            )
             return ComposeDraft(
                 mode: mode,
-                fromAddress: from,
+                fromAddress: account?.email ?? from,
                 to: "",
                 cc: "",
                 subject: subjectByPrefixing(message.subject, "Fwd:"),
                 body: "\n\n---------- Forwarded message ----------\n" + message.body + sig,
-                accountID: accountForDelivery(from) ?? message.accountID
+                accountID: account?.id ?? accountID
             )
         case .editDraft(let message):
+            let account = store.account(for: message.accountID)
+            let healed = MailSignatureFormatting.appendPlainIfNeeded(
+                body: message.body,
+                signature: account?.signature,
+                logoPath: account?.signatureLogoPath
+            )
             return ComposeDraft(
                 mode: mode,
                 fromAddress: message.fromAddress,
                 to: message.toAddresses.joined(separator: ", "),
                 cc: message.ccAddresses.joined(separator: ", "),
                 subject: message.subject,
-                body: message.body,
+                body: healed,
                 accountID: message.accountID
             )
         }

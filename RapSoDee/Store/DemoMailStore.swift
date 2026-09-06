@@ -292,7 +292,7 @@ final class DemoMailStore: MailStore {
 
     func updateSignature(accountID: UUID, signature: String) {
         guard let i = accounts.firstIndex(where: { $0.id == accountID }) else { return }
-        accounts[i].signature = signature
+        accounts[i].signature = MailSignatureFormatting.normalizeSignatureText(signature)
     }
 
     func updateSignatureLogo(accountID: UUID, path: String?) {
@@ -552,6 +552,7 @@ final class DemoMailStore: MailStore {
         let ccList = parseComposeAddresses(draft.cc)
         let includesSelf = draftIncludesSelf(draft, selfEmail: selfEmail)
 
+        // Local Sent preview always uses the plain `--` form once (HTML logo is send-only).
         let bodyWithSig = MailSignatureFormatting.appendPlainIfNeeded(
             body: draft.body,
             signature: live?.signature

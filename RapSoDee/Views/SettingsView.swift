@@ -827,7 +827,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-                Text("Small PNG/JPEG/GIF (≤512 KB). Included as HTML on send; plain text keeps the signature only.")
+                Text("Small PNG/JPEG/GIF (≤512 KB). With a logo, compose/send use the image + name once (no extra -- text block).")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
