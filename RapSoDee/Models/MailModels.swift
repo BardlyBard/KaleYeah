@@ -438,3 +438,58 @@ extension MailMessage {
         attachments.filter(\.showsInPaperclip)
     }
 }
+
+// MARK: - Pending server ops (retry after auth / next Sync)
+
+/// Durable queue entry when a local file/read/flag/delete could not reach Graph or IMAP.
+struct PendingServerOp: Identifiable, Hashable, Codable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        case move
+        case markRead
+        case flag
+        case delete
+    }
+
+    var id: UUID
+    var messageID: UUID
+    var accountID: UUID
+    var accountEmail: String
+    var kind: Kind
+    /// Graph / IMAP remote id at enqueue time (may be refreshed after a successful move).
+    var remoteID: String
+    /// Destination folder for `.move`.
+    var destinationFolderID: UUID?
+    /// Desired read state for `.markRead`.
+    var isRead: Bool?
+    /// Desired flagged state for `.flag`.
+    var flagged: Bool?
+    var enqueuedAt: Date
+    var lastError: String?
+
+    init(
+        id: UUID = UUID(),
+        messageID: UUID,
+        accountID: UUID,
+        accountEmail: String,
+        kind: Kind,
+        remoteID: String,
+        destinationFolderID: UUID? = nil,
+        isRead: Bool? = nil,
+        flagged: Bool? = nil,
+        enqueuedAt: Date = Date(),
+        lastError: String? = nil
+    ) {
+        self.id = id
+        self.messageID = messageID
+        self.accountID = accountID
+        self.accountEmail = accountEmail
+        self.kind = kind
+        self.remoteID = remoteID
+        self.destinationFolderID = destinationFolderID
+        self.isRead = isRead
+        self.flagged = flagged
+        self.enqueuedAt = enqueuedAt
+        self.lastError = lastError
+    }
+}
+

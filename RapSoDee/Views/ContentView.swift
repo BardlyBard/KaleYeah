@@ -135,39 +135,73 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            if !store.outboundStatus.isEmpty {
-                HStack(spacing: 10) {
-                    Image(systemName: store.outboundIsError ? "exclamationmark.triangle.fill" : "paperplane.fill")
-                        .foregroundStyle(store.outboundIsError ? Color.orange : MuseTheme.leaf)
-                    Text(store.outboundStatus)
-                        .font(.caption.weight(store.outboundIsError ? .semibold : .regular))
-                        .foregroundStyle(store.outboundIsError ? Color.primary : Color.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(3)
-                    Spacer(minLength: 8)
-                    if store.outboundIsError {
-                        Button("Settings") { showSettings = true }
-                            .buttonStyle(.bordered)
-                        Button("Dismiss") {
-                            store.clearOutboundStatus()
+            VStack(spacing: 8) {
+                if !store.serverOpStatus.isEmpty {
+                    HStack(spacing: 10) {
+                        Image(systemName: store.serverOpIsError ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath")
+                            .foregroundStyle(store.serverOpIsError ? Color.orange : MuseTheme.leaf)
+                        Text(store.serverOpStatus)
+                            .font(.caption.weight(store.serverOpIsError ? .semibold : .regular))
+                            .foregroundStyle(store.serverOpIsError ? Color.primary : Color.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(4)
+                        Spacer(minLength: 8)
+                        if store.serverOpIsError {
+                            Button("Settings") { showSettings = true }
+                                .buttonStyle(.bordered)
+                            Button("Dismiss") {
+                                store.clearServerOpStatus()
+                            }
+                            .buttonStyle(.borderless)
+                        } else {
+                            Text("Tap to dismiss")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
-                        .buttonStyle(.borderless)
-                    } else {
-                        Text("Tap to dismiss")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
                     }
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        store.clearServerOpStatus()
+                    }
+                    .help(store.serverOpIsError ? "Server file/sync error — re-auth in Settings if sign-in expired" : "Tap to dismiss")
                 }
-                .padding(12)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    store.clearOutboundStatus()
+
+                if !store.outboundStatus.isEmpty {
+                    HStack(spacing: 10) {
+                        Image(systemName: store.outboundIsError ? "exclamationmark.triangle.fill" : "paperplane.fill")
+                            .foregroundStyle(store.outboundIsError ? Color.orange : MuseTheme.leaf)
+                        Text(store.outboundStatus)
+                            .font(.caption.weight(store.outboundIsError ? .semibold : .regular))
+                            .foregroundStyle(store.outboundIsError ? Color.primary : Color.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                        Spacer(minLength: 8)
+                        if store.outboundIsError {
+                            Button("Settings") { showSettings = true }
+                                .buttonStyle(.bordered)
+                            Button("Dismiss") {
+                                store.clearOutboundStatus()
+                            }
+                            .buttonStyle(.borderless)
+                        } else {
+                            Text("Tap to dismiss")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        store.clearOutboundStatus()
+                    }
+                    .help(store.outboundIsError ? "Outbound error" : "Tap to dismiss")
                 }
-                .help(store.outboundIsError ? "Outbound error" : "Tap to dismiss")
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
         }
         .overlay(alignment: .top) {
             if store.gmailNeedsSetup && !dismissGmailPrompt {
@@ -263,15 +297,27 @@ struct ContentView: View {
             Button {
                 Task { await store.syncAllConnectedAccounts() }
             } label: {
-                if store.isAnyLiveSyncing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 16, height: 16)
-                } else {
-                    Label("Sync all", systemImage: "arrow.triangle.2.circlepath")
+                ZStack(alignment: .topTrailing) {
+                    if store.isAnyLiveSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Label("Sync all", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    if store.pendingServerOpCount > 0 || store.serverOpIsError {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 8, height: 8)
+                            .offset(x: 4, y: -2)
+                    }
                 }
             }
-            .help("Sync Gmail and Microsoft 365")
+            .help(
+                store.pendingServerOpCount > 0
+                    ? "Sync Gmail and Microsoft 365 — \(store.pendingServerOpCount) queued server action(s) waiting (often expired sign-in)"
+                    : "Sync Gmail and Microsoft 365"
+            )
             .disabled(store.isAnyLiveSyncing)
 
             Button {

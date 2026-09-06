@@ -440,6 +440,15 @@ struct MessageRowView: View {
                             .padding(.vertical, 2)
                             .background(MuseTheme.approve.opacity(0.25), in: Capsule())
                     }
+                    if let pendingLabel = store.pendingSyncBadgeLabel(for: message) {
+                        Text(pendingLabel)
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .foregroundStyle(Color.orange)
+                            .background(Color.orange.opacity(0.18), in: Capsule())
+                            .help("Local change is not on the server yet — re-auth if sign-in expired, then Sync")
+                    }
                 }
             }
         }

@@ -54,6 +54,15 @@ final class DemoMailStore: MailStore {
     /// Bumped so delayed auto-clear does not wipe a newer banner.
     private var outboundStatusClearGeneration: Int = 0
 
+    /// File/move/read/flag server failure banner (near Sync) — not buried in Settings only.
+    var serverOpStatus: String = ""
+    var serverOpIsError: Bool = false
+    private var serverOpStatusClearGeneration: Int = 0
+    /// Durable retry queue when Graph/IMAP mutations fail (esp. silent auth expiry).
+    private(set) var pendingServerOps: [PendingServerOp] = []
+
+    var pendingServerOpCount: Int { pendingServerOps.count }
+
     /// Universal toolbar sync busy (Gmail + M365).
     var isUniversalSyncing: Bool = false
     /// Prevent overlapping Sync all / auto-sync runs.
@@ -83,6 +92,7 @@ final class DemoMailStore: MailStore {
         deduplicateLiveAccountShells()
         enforceCalliopeExcludedFromUnifiedInbox()
         loadMessageCacheFromDisk()
+        pendingServerOps = MailMessageCache.loadPendingServerOps()
         ensureApproveMailbox()
         injectApproveTestDraftIfNeeded()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
@@ -239,9 +249,21 @@ final class DemoMailStore: MailStore {
                     loginHint: account.email
                 )
                 try await MicrosoftGraphMailService.deleteMessage(accessToken: token, graphMessageID: remote)
+                removePendingServerOps(messageID: message.id, kind: .delete)
             } catch {
                 // Keep tombstone + local trash; next sync still will not resurrect.
-                office365LastError = "Delete failed: \(error.localizedDescription)"
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .delete,
+                        remoteID: remote,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "Delete failed: \(error.localizedDescription)",
+                    error: error
+                )
             }
             return
         }
@@ -271,7 +293,20 @@ final class DemoMailStore: MailStore {
 
         if account.isLiveOffice365 {
             guard let destID = graphDestinationID(for: destination) else {
-                office365LastError = "File failed: destination folder has no Graph id (Sync may revert)."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: messageID,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .move,
+                        remoteID: remote,
+                        destinationFolderID: destination.id,
+                        lastError: "destination folder has no Graph id"
+                    ),
+                    surface: "File failed: destination folder has no Graph id (queued for retry after Sync).",
+                    error: nil,
+                    forceAuthHint: false
+                )
                 return
             }
             do {
@@ -290,19 +325,63 @@ final class DemoMailStore: MailStore {
                     }
                     persistMessageCache()
                 }
+                removePendingServerOps(messageID: messageID, kind: .move)
                 office365LastError = nil
             } catch {
-                office365LastError = "File/move failed: \(error.localizedDescription). Local move kept — Sync may revert until retry."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: messageID,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .move,
+                        remoteID: remote,
+                        destinationFolderID: destination.id,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "File/move failed: \(error.localizedDescription). Local move kept — retry after Sign in / Sync.",
+                    error: error
+                )
             }
             return
         }
 
         if account.isLiveGmail {
             guard let destMailbox = imapDestinationMailbox(for: destination, providerHint: .gmail) else {
-                gmailLastError = "File failed: destination folder has no IMAP mailbox (Sync may revert)."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: messageID,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .move,
+                        remoteID: remote,
+                        destinationFolderID: destination.id,
+                        lastError: "destination folder has no IMAP mailbox"
+                    ),
+                    surface: "File failed: destination folder has no IMAP mailbox (queued for retry).",
+                    error: nil,
+                    forceAuthHint: false,
+                    isGmail: true
+                )
                 return
             }
-            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: messageID,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .move,
+                        remoteID: remote,
+                        destinationFolderID: destination.id,
+                        lastError: "missing Gmail app password"
+                    ),
+                    surface: "File failed: Gmail credentials missing. Local move kept — retry after reconnect.",
+                    error: nil,
+                    forceAuthHint: false,
+                    isGmail: true
+                )
+                return
+            }
             do {
                 let newRemote = try await GmailSyncService.moveRemoteMessage(
                     email: account.email,
@@ -314,9 +393,23 @@ final class DemoMailStore: MailStore {
                     messages[i].remoteID = newRemote
                     persistMessageCache()
                 }
+                removePendingServerOps(messageID: messageID, kind: .move)
                 gmailLastError = nil
             } catch {
-                gmailLastError = "File/move failed: \(error.localizedDescription). Local move kept — Sync may revert until retry."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: messageID,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .move,
+                        remoteID: remote,
+                        destinationFolderID: destination.id,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "File/move failed: \(error.localizedDescription). Local move kept — retry on next Sync.",
+                    error: error,
+                    isGmail: true
+                )
             }
         }
     }
@@ -337,15 +430,45 @@ final class DemoMailStore: MailStore {
                     graphMessageID: remote,
                     isRead: isRead
                 )
+                removePendingServerOps(messageID: message.id, kind: .markRead)
                 office365LastError = nil
             } catch {
-                office365LastError = "Mark read failed: \(error.localizedDescription). Sync may revert."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .markRead,
+                        remoteID: remote,
+                        isRead: isRead,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "Mark read failed: \(error.localizedDescription). Queued for retry after Sign in / Sync.",
+                    error: error
+                )
             }
             return
         }
 
         if account.isLiveGmail {
-            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .markRead,
+                        remoteID: remote,
+                        isRead: isRead,
+                        lastError: "missing Gmail app password"
+                    ),
+                    surface: "Mark read failed: Gmail credentials missing. Queued for retry.",
+                    error: nil,
+                    forceAuthHint: false,
+                    isGmail: true
+                )
+                return
+            }
             do {
                 try await GmailSyncService.updateRemoteMessageFlags(
                     email: account.email,
@@ -353,9 +476,23 @@ final class DemoMailStore: MailStore {
                     remoteID: remote,
                     seen: isRead
                 )
+                removePendingServerOps(messageID: message.id, kind: .markRead)
                 gmailLastError = nil
             } catch {
-                gmailLastError = "Mark read failed: \(error.localizedDescription). Sync may revert."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .markRead,
+                        remoteID: remote,
+                        isRead: isRead,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "Mark read failed: \(error.localizedDescription). Queued for retry on next Sync.",
+                    error: error,
+                    isGmail: true
+                )
             }
         }
     }
@@ -376,15 +513,45 @@ final class DemoMailStore: MailStore {
                     graphMessageID: remote,
                     flagged: flagged
                 )
+                removePendingServerOps(messageID: message.id, kind: .flag)
                 office365LastError = nil
             } catch {
-                office365LastError = "Flag failed: \(error.localizedDescription). Sync may revert."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .flag,
+                        remoteID: remote,
+                        flagged: flagged,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "Flag failed: \(error.localizedDescription). Queued for retry after Sign in / Sync.",
+                    error: error
+                )
             }
             return
         }
 
         if account.isLiveGmail {
-            guard let password = KeychainCredentialStore.password(forEmail: account.email) else { return }
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .flag,
+                        remoteID: remote,
+                        flagged: flagged,
+                        lastError: "missing Gmail app password"
+                    ),
+                    surface: "Flag failed: Gmail credentials missing. Queued for retry.",
+                    error: nil,
+                    forceAuthHint: false,
+                    isGmail: true
+                )
+                return
+            }
             do {
                 try await GmailSyncService.updateRemoteMessageFlags(
                     email: account.email,
@@ -392,9 +559,23 @@ final class DemoMailStore: MailStore {
                     remoteID: remote,
                     flagged: flagged
                 )
+                removePendingServerOps(messageID: message.id, kind: .flag)
                 gmailLastError = nil
             } catch {
-                gmailLastError = "Flag failed: \(error.localizedDescription). Sync may revert."
+                enqueuePendingServerOp(
+                    PendingServerOp(
+                        messageID: message.id,
+                        accountID: account.id,
+                        accountEmail: account.email,
+                        kind: .flag,
+                        remoteID: remote,
+                        flagged: flagged,
+                        lastError: error.localizedDescription
+                    ),
+                    surface: "Flag failed: \(error.localizedDescription). Queued for retry on next Sync.",
+                    error: error,
+                    isGmail: true
+                )
             }
         }
     }
@@ -691,6 +872,42 @@ final class DemoMailStore: MailStore {
         outboundStatusClearGeneration += 1
         outboundStatus = ""
         outboundIsError = false
+    }
+
+    func clearServerOpStatus() {
+        serverOpStatusClearGeneration += 1
+        serverOpStatus = ""
+        serverOpIsError = false
+    }
+
+    private func setServerOpStatus(_ message: String, isError: Bool) {
+        serverOpStatus = message
+        serverOpIsError = isError
+        serverOpStatusClearGeneration += 1
+        let generation = serverOpStatusClearGeneration
+        guard !isError, !message.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard generation == serverOpStatusClearGeneration else { return }
+            if !serverOpIsError {
+                serverOpStatus = ""
+            }
+        }
+    }
+
+    func hasPendingServerSync(messageID: UUID) -> Bool {
+        pendingServerOps.contains { $0.messageID == messageID }
+    }
+
+    func pendingSyncBadgeLabel(for message: MailMessage) -> String? {
+        guard hasPendingServerSync(messageID: message.id) else { return nil }
+        if let account = account(for: message.accountID), account.isLiveOffice365 {
+            return "Not synced to Outlook"
+        }
+        if let account = account(for: message.accountID), account.isLiveGmail {
+            return "Not synced to Gmail"
+        }
+        return "Not synced to server"
     }
 
     private func setOutboundStatus(_ message: String, isError: Bool) {
@@ -1223,6 +1440,7 @@ final class DemoMailStore: MailStore {
                 applyNotificationPolicy(for: msg)
             }
             persistMessageCache()
+            await flushPendingServerOps(for: account)
         } catch {
             gmailLastError = error.localizedDescription
             gmailSyncStatus = "Sync failed"
@@ -2054,6 +2272,9 @@ final class DemoMailStore: MailStore {
             office365NeedsSetup = false
             office365IsSyncing = false
             office365SyncStartedAt = nil
+            if let account = office365Account(email: email) ?? office365Accounts().first(where: { $0.email.lowercased() == email.lowercased() }) {
+                await flushPendingServerOps(for: account)
+            }
             await syncOffice365Now()
         } catch is CancellationError {
             if generation == office365SyncGeneration {
@@ -2212,6 +2433,7 @@ final class DemoMailStore: MailStore {
             do {
                 let status = try await syncOneOffice365Account(account, generation: generation)
                 statuses.append("\(account.email): \(status)")
+                await flushPendingServerOps(for: account)
             } catch is CancellationError {
                 if generation == office365SyncGeneration {
                     office365SyncStatus = "Sync cancelled"
@@ -2587,6 +2809,227 @@ final class DemoMailStore: MailStore {
         } else {
             office365LastError = msg
         }
+    }
+
+    // MARK: - Pending server ops queue
+
+    private func persistPendingServerOps() {
+        MailMessageCache.savePendingServerOps(pendingServerOps)
+    }
+
+    private func removePendingServerOps(messageID: UUID, kind: PendingServerOp.Kind? = nil) {
+        let before = pendingServerOps.count
+        pendingServerOps.removeAll { op in
+            op.messageID == messageID && (kind == nil || op.kind == kind)
+        }
+        if pendingServerOps.count != before {
+            persistPendingServerOps()
+        }
+    }
+
+    private func enqueuePendingServerOp(
+        _ op: PendingServerOp,
+        surface: String,
+        error: Error?,
+        forceAuthHint: Bool? = nil,
+        isGmail: Bool = false
+    ) {
+        // Deduplicate by message + kind — keep newest intent.
+        pendingServerOps.removeAll { $0.messageID == op.messageID && $0.kind == op.kind }
+        pendingServerOps.append(op)
+        persistPendingServerOps()
+
+        let authRelated: Bool
+        if let forceAuthHint {
+            authRelated = forceAuthHint
+        } else if let error {
+            authRelated = Self.isSilentAuthFailure(error)
+        } else {
+            authRelated = false
+        }
+
+        if isGmail {
+            gmailLastError = surface
+        } else {
+            office365LastError = surface
+            if authRelated {
+                office365NeedsSetup = true
+                noteOffice365AuthStateChanged()
+            }
+        }
+        let pendingNote = pendingServerOps.count == 1
+            ? "1 action waiting to sync."
+            : "\(pendingServerOps.count) actions waiting to sync."
+        let authNote = authRelated && !isGmail
+            ? " Sign in with device code expired — re-auth, then Sync."
+            : ""
+        setServerOpStatus("\(surface) \(pendingNote)\(authNote)", isError: true)
+    }
+
+    /// Flush queued Graph/IMAP mutations after a successful token / device-code sign-in / Sync.
+    func flushPendingServerOps(for account: MailAccount) async {
+        let mine = pendingServerOps.filter { $0.accountID == account.id || $0.accountEmail.lowercased() == account.email.lowercased() }
+        guard !mine.isEmpty else { return }
+
+        setServerOpStatus("Retrying \(mine.count) queued Outlook/server action(s)…", isError: false)
+
+        var remaining: [PendingServerOp] = []
+        var succeeded = 0
+        for op in mine {
+            let ok = await replayPendingServerOp(op, account: account)
+            if ok {
+                succeeded += 1
+            } else if let updated = pendingServerOps.first(where: { $0.id == op.id }) {
+                remaining.append(updated)
+            } else {
+                remaining.append(op)
+            }
+        }
+
+        // Keep ops for other accounts + failures for this account.
+        let other = pendingServerOps.filter { $0.accountID != account.id && $0.accountEmail.lowercased() != account.email.lowercased() }
+        pendingServerOps = other + remaining
+        persistPendingServerOps()
+
+        if remaining.isEmpty {
+            if succeeded > 0 {
+                setServerOpStatus("Synced \(succeeded) queued action(s) to the server.", isError: false)
+                if account.isLiveOffice365 {
+                    office365LastError = nil
+                } else if account.isLiveGmail {
+                    gmailLastError = nil
+                }
+            }
+        } else {
+            let msg = "Still waiting on \(remaining.count) queued action(s) for \(account.email)."
+            setServerOpStatus(msg, isError: true)
+            if account.isLiveOffice365 {
+                office365LastError = msg
+            } else {
+                gmailLastError = msg
+            }
+        }
+    }
+
+    private func replayPendingServerOp(_ op: PendingServerOp, account: MailAccount) async -> Bool {
+        // Prefer live message remoteID / folder if still present.
+        let live = messages.first(where: { $0.id == op.messageID })
+        let remote = normalizedRemoteID(live?.remoteID) ?? normalizedRemoteID(op.remoteID)
+        guard let remote, !remote.hasPrefix(Self.optimisticRemotePrefix) else {
+            return true // nothing to do / optimistic — drop
+        }
+
+        if account.isLiveOffice365 {
+            do {
+                let token = try await MSALAuthService.shared.acquireAccessToken(
+                    interactiveIfNeeded: false,
+                    loginHint: account.email
+                )
+                switch op.kind {
+                case .move:
+                    let destFolderID = op.destinationFolderID ?? live?.folderID
+                    guard let destFolderID,
+                          let dest = folders.first(where: { $0.id == destFolderID }),
+                          let destID = graphDestinationID(for: dest) else {
+                        return false
+                    }
+                    let newID = try await MicrosoftGraphMailService.moveMessage(
+                        accessToken: token,
+                        graphMessageID: remote,
+                        destinationId: destID
+                    )
+                    if let i = messages.firstIndex(where: { $0.id == op.messageID }), newID != remote {
+                        messages[i].remoteID = newID
+                        persistMessageCache()
+                    }
+                    return true
+                case .markRead:
+                    let isRead = op.isRead ?? live?.isRead ?? true
+                    try await MicrosoftGraphMailService.updateMessageRead(
+                        accessToken: token,
+                        graphMessageID: remote,
+                        isRead: isRead
+                    )
+                    return true
+                case .flag:
+                    let flagged = op.flagged ?? live?.isFlagged ?? false
+                    try await MicrosoftGraphMailService.updateMessageFlag(
+                        accessToken: token,
+                        graphMessageID: remote,
+                        flagged: flagged
+                    )
+                    return true
+                case .delete:
+                    try await MicrosoftGraphMailService.deleteMessage(accessToken: token, graphMessageID: remote)
+                    return true
+                }
+            } catch {
+                if let i = pendingServerOps.firstIndex(where: { $0.id == op.id }) {
+                    pendingServerOps[i].lastError = error.localizedDescription
+                }
+                return false
+            }
+        }
+
+        if account.isLiveGmail {
+            guard let password = KeychainCredentialStore.password(forEmail: account.email) else {
+                return false
+            }
+            do {
+                switch op.kind {
+                case .move:
+                    let destFolderID = op.destinationFolderID ?? live?.folderID
+                    guard let destFolderID,
+                          let dest = folders.first(where: { $0.id == destFolderID }),
+                          let mailbox = imapDestinationMailbox(for: dest, providerHint: .gmail) else {
+                        return false
+                    }
+                    let newRemote = try await GmailSyncService.moveRemoteMessage(
+                        email: account.email,
+                        password: password,
+                        remoteID: remote,
+                        destinationMailbox: mailbox
+                    )
+                    if let i = messages.firstIndex(where: { $0.id == op.messageID }) {
+                        messages[i].remoteID = newRemote
+                        persistMessageCache()
+                    }
+                    return true
+                case .markRead:
+                    let isRead = op.isRead ?? live?.isRead ?? true
+                    try await GmailSyncService.updateRemoteMessageFlags(
+                        email: account.email,
+                        password: password,
+                        remoteID: remote,
+                        seen: isRead
+                    )
+                    return true
+                case .flag:
+                    let flagged = op.flagged ?? live?.isFlagged ?? false
+                    try await GmailSyncService.updateRemoteMessageFlags(
+                        email: account.email,
+                        password: password,
+                        remoteID: remote,
+                        flagged: flagged
+                    )
+                    return true
+                case .delete:
+                    try await GmailSyncService.deleteRemoteMessage(
+                        email: account.email,
+                        password: password,
+                        remoteID: remote
+                    )
+                    return true
+                }
+            } catch {
+                if let i = pendingServerOps.firstIndex(where: { $0.id == op.id }) {
+                    pendingServerOps[i].lastError = error.localizedDescription
+                }
+                return false
+            }
+        }
+
+        return false
     }
 
     private static func isSilentAuthFailure(_ error: Error) -> Bool {

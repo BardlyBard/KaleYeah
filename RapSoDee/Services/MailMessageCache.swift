@@ -7,6 +7,7 @@ enum MailMessageCache {
     private static let messagesFile = "messages.json"
     private static let tombstonesFile = "deletedRemoteIDs.json"
     private static let syncStateFile = "syncState.json"
+    private static let pendingOpsFile = "pendingServerOps.json"
     private static let bodiesFolder = "bodies"
 
     /// Soft cap for the durable list index (metadata). Far above the old ~200 sync window.
@@ -33,6 +34,10 @@ enum MailMessageCache {
 
     private static var syncStateURL: URL {
         rootDirectory.appendingPathComponent(syncStateFile)
+    }
+
+    private static var pendingOpsURL: URL {
+        rootDirectory.appendingPathComponent(pendingOpsFile)
     }
 
     private static var bodiesDirectory: URL {
@@ -212,6 +217,22 @@ enum MailMessageCache {
         let list = Array(ids).sorted()
         guard let data = try? JSONEncoder().encode(list) else { return }
         try? data.write(to: tombstonesURL, options: .atomic)
+    }
+
+
+    // MARK: - Pending server ops
+
+    static func loadPendingServerOps() -> [PendingServerOp] {
+        guard let data = try? Data(contentsOf: pendingOpsURL),
+              let list = try? JSONDecoder().decode([PendingServerOp].self, from: data) else {
+            return []
+        }
+        return list
+    }
+
+    static func savePendingServerOps(_ ops: [PendingServerOp]) {
+        guard let data = try? JSONEncoder().encode(ops) else { return }
+        try? data.write(to: pendingOpsURL, options: .atomic)
     }
 
     // MARK: - Sync state (delta / UID high-water)

@@ -277,6 +277,11 @@ struct SettingsView: View {
                     .foregroundStyle(.red)
                     .textSelection(.enabled)
             }
+            if store.pendingServerOpCount > 0 {
+                Text("\(store.pendingServerOpCount) queued file/read/flag action(s) will retry after a successful Sign in / Sync.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             if store.office365IsSyncing || office365Busy {
                 HStack(spacing: 10) {
