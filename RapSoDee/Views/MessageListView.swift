@@ -171,7 +171,7 @@ struct MessageRowView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(message.fromName)
+                    Text(primaryPartyLabel)
                         .font(.headline)
                         .fontWeight(message.isRead ? .regular : .semibold)
                         .lineLimit(1)
@@ -218,6 +218,25 @@ struct MessageRowView: View {
             return Color(hex: flag.colorHex)
         }
         return MuseTheme.approve
+    }
+
+    /// Sent lists: show To (sender is always us). Elsewhere: From.
+    private var primaryPartyLabel: String {
+        let inSent = store.folder(for: message.folderID)?.kind == .sent
+        if inSent {
+            return recipientListLabel
+        }
+        if !message.fromName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return message.fromName
+        }
+        return message.fromAddress
+    }
+
+    private var recipientListLabel: String {
+        let tos = message.toAddresses.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let first = tos.first else { return "(No recipient)" }
+        if tos.count == 1 { return first }
+        return "\(first) +\(tos.count - 1)"
     }
 }
 

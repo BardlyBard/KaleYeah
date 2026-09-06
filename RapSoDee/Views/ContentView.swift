@@ -269,8 +269,10 @@ struct ContentView: View {
     private func makeDraft(_ mode: ComposeMode) -> ComposeDraft {
         switch mode {
         case .new:
-            guard let account = store.gmailAccount()
+            // Prefer Derek's M365 (non-Callie) so we don't start with Gmail's "— Derek" then stack M365.
+            guard let account = store.accounts.first(where: { $0.isLiveOffice365 && !$0.isCalliope && !$0.email.lowercased().contains("calliope") })
                 ?? store.office365Account()
+                ?? store.gmailAccount()
                 ?? store.accounts.first(where: { !$0.isCalliope })
                 ?? store.accounts.first else {
                 return ComposeDraft(
@@ -328,13 +330,15 @@ struct ContentView: View {
             )
         case .forward(let message):
             let from = message.deliveredTo
+            let account = store.account(for: accountForDelivery(from) ?? message.accountID) ?? store.accounts.first
+            let sig = MailSignatureFormatting.plainBlock(signature: account?.signature)
             return ComposeDraft(
                 mode: mode,
                 fromAddress: from,
                 to: "",
                 cc: "",
                 subject: subjectByPrefixing(message.subject, "Fwd:"),
-                body: "\n\n---------- Forwarded message ----------\n" + message.body,
+                body: "\n\n---------- Forwarded message ----------\n" + message.body + sig,
                 accountID: accountForDelivery(from) ?? message.accountID
             )
         case .editDraft(let message):

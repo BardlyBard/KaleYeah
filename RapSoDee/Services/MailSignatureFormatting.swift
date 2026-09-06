@@ -14,41 +14,49 @@ enum MailSignatureFormatting {
         return "\n\n--\n" + text
     }
 
+    /// True when this signature already appears as the sole trailing `--` block.
     static func bodyAlreadyHasSignature(_ body: String, signature: String?) -> Bool {
         let text = trimmed(signature)
         guard !text.isEmpty else { return true }
-        if body.contains(text) { return true }
         let block = plainBlock(signature: text)
-        return body.hasSuffix(block) || body.contains(block)
+        if body.hasSuffix(block) { return true }
+        if let last = lastTrailingDashSignaturePayload(in: body) {
+            return trimmed(last) == text
+        }
+        return false
     }
 
-    /// Append `\n\n--\n{signature}` at most once.
+    /// RFC 3676-style: strip every trailing `\n--\n…` block (stacked / mismatched account sigs).
+    static func stripTrailingDashSignatures(from body: String) -> String {
+        var result = body
+        while let range = result.range(of: "\n--\n", options: .backwards) {
+            result = String(result[..<range.lowerBound])
+        }
+        let t = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("--\n") || t == "--" {
+            return ""
+        }
+        while result.hasSuffix("\n") { result.removeLast() }
+        return result
+    }
+
+    private static func lastTrailingDashSignaturePayload(in body: String) -> String? {
+        guard let range = body.range(of: "\n--\n", options: .backwards) else { return nil }
+        return String(body[range.upperBound...])
+    }
+
+    /// Ensure exactly one trailing signature (strips prior `--` blocks first, then appends once).
     static func appendPlainIfNeeded(body: String, signature: String?) -> String {
         let text = trimmed(signature)
-        guard !text.isEmpty else { return body }
-        if bodyAlreadyHasSignature(body, signature: text) { return body }
-        return body + plainBlock(signature: text)
+        let base = stripTrailingDashSignatures(from: body)
+        guard !text.isEmpty else { return base }
+        return base + plainBlock(signature: text)
     }
 
-    /// Swap one account's signature block for another's (From picker).
+    /// Swap From-account signature: drop all trailing `--` blocks, then attach the new one once.
     static func replaceSignature(in body: String, old: String?, new: String?) -> String {
-        var result = body
-        let oldText = trimmed(old)
-        if !oldText.isEmpty {
-            let oldBlock = plainBlock(signature: oldText)
-            if result.hasSuffix(oldBlock) {
-                result.removeLast(oldBlock.count)
-            } else if let range = result.range(of: oldBlock) {
-                result.removeSubrange(range)
-            } else if let range = result.range(of: "\n\n--\n" + oldText) {
-                result.removeSubrange(range)
-            } else if let range = result.range(of: oldText), result[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Trailing bare signature without separator.
-                result.removeSubrange(range)
-                while result.hasSuffix("\n") { result.removeLast() }
-            }
-        }
-        return appendPlainIfNeeded(body: result, signature: new)
+        _ = old // May differ by punctuation/account; stripping all trailing `--` blocks is safer.
+        return appendPlainIfNeeded(body: body, signature: new)
     }
 
     static func escapeHTML(_ text: String) -> String {

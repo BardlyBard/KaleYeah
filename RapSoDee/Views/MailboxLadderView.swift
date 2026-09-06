@@ -25,8 +25,17 @@ struct MailboxLadderView: View {
                     wash: Color.clear
                 )
                 Label {
-                    Text("Approve")
-                        .fontWeight(.semibold)
+                    HStack {
+                        Text("Approve")
+                            .fontWeight(.semibold)
+                        if pendingApproveCount > 0 {
+                            Text("\(pendingApproveCount)")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(MuseTheme.approve.opacity(0.35), in: Capsule())
+                        }
+                    }
                 } icon: {
                     Image(systemName: "checkmark.seal.fill")
                         .foregroundStyle(MuseTheme.approve)
@@ -368,6 +377,10 @@ struct MailboxLadderView: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
+    }
+
+    private var pendingApproveCount: Int {
+        store.messages(for: .approve).filter { $0.disposition == .pendingApproval }.count
     }
 
     private func folders(for account: MailAccount) -> [MailFolder] {

@@ -93,12 +93,7 @@ struct ComposeView: View {
                     .disabled(isSending)
                 if isApproveEdit {
                     Button("Save to Approve") {
-                        if case .editDraft(let message) = draft.mode {
-                            store.saveApproveDraft(draft, messageID: message.id)
-                        } else {
-                            store.saveApproveDraft(draft, messageID: nil)
-                        }
-                        close()
+                        saveToApprove()
                     }
                     .buttonStyle(MuseCapsuleButtonStyle())
                     .disabled(isSending)
@@ -108,6 +103,14 @@ struct ComposeView: View {
                     .buttonStyle(MuseCapsuleButtonStyle(prominent: true, tint: MuseTheme.approve))
                     .disabled(isSending || store.accounts.isEmpty)
                 } else {
+                    if isCallieFrom {
+                        Button("Save to Approve") {
+                            saveToApprove()
+                        }
+                        .buttonStyle(MuseCapsuleButtonStyle(tint: MuseTheme.approve))
+                        .disabled(isSending || store.accounts.isEmpty)
+                        .help("Park this draft in Approve for Derek — does not send")
+                    }
                     Button(isSending ? "Sending…" : "Send") {
                         performSend(removeApproveDraft: false)
                     }
@@ -161,6 +164,24 @@ struct ComposeView: View {
     private var isApproveEdit: Bool {
         if case .editDraft(let m) = draft.mode { return m.disposition == .pendingApproval }
         return false
+    }
+
+    private var isCallieFrom: Bool {
+        let from = draft.fromAddress.lowercased()
+        if from.contains("calliope") { return true }
+        if let account = store.account(for: draft.accountID) {
+            return account.isCalliope || account.email.lowercased().contains("calliope")
+        }
+        return false
+    }
+
+    private func saveToApprove() {
+        if case .editDraft(let message) = draft.mode {
+            store.saveApproveDraft(draft, messageID: message.id)
+        } else {
+            store.saveApproveDraft(draft, messageID: nil)
+        }
+        close()
     }
 
     private var form: some View {

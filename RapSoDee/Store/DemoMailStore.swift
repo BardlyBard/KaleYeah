@@ -82,6 +82,8 @@ final class DemoMailStore: MailStore {
         restoreOffice365AccountShellIfNeeded()
         deduplicateLiveAccountShells()
         loadMessageCacheFromDisk()
+        ensureApproveMailbox()
+        injectApproveTestDraftIfNeeded()
         gmailNeedsSetup = !GmailSyncService.hasKeychainCredentials(email: gmailAccount()?.email)
         office365NeedsSetup = MSALAppConfig.rememberedSignedInEmails.isEmpty && Office365SyncService.rememberedAccounts().isEmpty
     }
@@ -676,6 +678,7 @@ final class DemoMailStore: MailStore {
     }
 
     func saveApproveDraft(_ draft: ComposeDraft, messageID: UUID?) {
+        ensureApproveMailbox()
         let approveID = folders.first { $0.kind == .approve }?.id ?? approveFolderID
         if let messageID, let i = messages.firstIndex(where: { $0.id == messageID }) {
             messages[i].subject = draft.subject
@@ -686,8 +689,15 @@ final class DemoMailStore: MailStore {
             messages[i].disposition = .pendingApproval
             messages[i].folderID = approveID
             messages[i].isDraft = true
+            if let account = accountForApproveDraft(draft) {
+                messages[i].accountID = account.id
+                messages[i].fromName = account.name
+                messages[i].fromAddress = account.email
+                messages[i].deliveredTo = account.email
+            }
+            persistMessageCache()
         } else {
-            guard let account = accounts.first(where: { !$0.isCalliope }) ?? accounts.first else { return }
+            guard let account = accountForApproveDraft(draft) else { return }
             let msg = MailMessage(
                 accountID: account.id,
                 folderID: approveID,
@@ -704,7 +714,79 @@ final class DemoMailStore: MailStore {
                 isDraft: true
             )
             messages.insert(msg, at: 0)
+            persistMessageCache()
         }
+    }
+
+    /// Prefer the compose From / accountID so Callie's drafts stay From Callie (and send with her token).
+    private func accountForApproveDraft(_ draft: ComposeDraft) -> MailAccount? {
+        if let account = account(for: draft.accountID) {
+            return account
+        }
+        let from = draft.fromAddress.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !from.isEmpty, let byFrom = accounts.first(where: { $0.email.lowercased() == from }) {
+            return byFrom
+        }
+        if from.contains("calliope") || draft.fromAddress.lowercased().contains("calliope") {
+            if let callie = accounts.first(where: { $0.isCalliope || $0.email.lowercased().contains("calliope") }) {
+                return callie
+            }
+            return ensureOffice365Account(email: MSALAppConfig.calliopeEmail)
+        }
+        return accounts.first(where: { !$0.isCalliope }) ?? accounts.first
+    }
+
+    /// Shared smart Approve mailbox (ladder) — always present after seed; recreate if stripped.
+    func ensureApproveMailbox() {
+        if folders.contains(where: { $0.kind == .approve }) { return }
+        folders.insert(
+            MailFolder(id: approveFolderID, accountID: nil, name: "Approve", kind: .approve, sortOrder: -2, isPinned: true, isSmart: true),
+            at: 0
+        )
+    }
+
+    private static let injectApproveTestDefaultsKey = "rapSoDee.injectApproveTestDraft"
+    private static let injectApproveTestSubject = "Approve-flow test (please send)"
+
+    /// One-shot: `--inject-approve-test` launch arg or UserDefaults flag parks a Callie→Derek draft in Approve (not sent).
+    func injectApproveTestDraftIfNeeded() {
+        let viaArg = CommandLine.arguments.contains("--inject-approve-test")
+        let viaDefaults = UserDefaults.standard.bool(forKey: Self.injectApproveTestDefaultsKey)
+        guard viaArg || viaDefaults else { return }
+        UserDefaults.standard.set(false, forKey: Self.injectApproveTestDefaultsKey)
+
+        ensureApproveMailbox()
+        _ = ensureOffice365Account(email: MSALAppConfig.calliopeEmail)
+        guard let callie = accounts.first(where: {
+            $0.isCalliope || $0.email.lowercased() == MSALAppConfig.calliopeEmail.lowercased()
+        }) else {
+            print("RapSoDee: inject Approve test draft skipped — Callie account missing")
+            return
+        }
+
+        if messages.contains(where: {
+            $0.subject == Self.injectApproveTestSubject && $0.disposition == .pendingApproval
+        }) {
+            print("RapSoDee: Approve test draft already present — not duplicating")
+            return
+        }
+
+        let body = """
+        Short note — draft from Callie for Derek to approve in RapSoDee Approve mailbox.
+
+        Open Approve, review, then Approve & Send (or Reject). This was not auto-sent.
+        """
+        let draft = ComposeDraft(
+            mode: .new,
+            fromAddress: callie.email,
+            to: "derek.brown@kaleyeahinspections.com",
+            cc: "",
+            subject: Self.injectApproveTestSubject,
+            body: body,
+            accountID: callie.id
+        )
+        saveApproveDraft(draft, messageID: nil)
+        print("RapSoDee: injected Approve test draft From \(callie.email) → derek.brown@kaleyeahinspections.com")
     }
 
     func approveAndSend(_ messageID: UUID) {
@@ -1388,6 +1470,21 @@ final class DemoMailStore: MailStore {
                 }
             }
             ensureStandardMailFolders(for: existing.id, baseSort: isCallie ? -15 : -20)
+            if isCallie {
+                ensureApproveMailbox()
+                if !folders.contains(where: { $0.accountID == existing.id && $0.kind == .approve }) {
+                    folders.append(
+                        MailFolder(
+                            accountID: existing.id,
+                            name: "Approve",
+                            kind: .approve,
+                            sortOrder: (isCallie ? -15 : -20) + 5,
+                            isPinned: false,
+                            isSmart: false
+                        )
+                    )
+                }
+            }
             Office365SyncService.rememberAccount(email: trimmed, id: existing.id)
             return accounts.first { $0.id == existing.id }!
         }
@@ -1427,7 +1524,15 @@ final class DemoMailStore: MailStore {
         let drafts = MailFolder(accountID: stableID, name: "Drafts", kind: .drafts, sortOrder: base + 2, remoteID: "drafts")
         let archive = MailFolder(accountID: stableID, name: "Archive", kind: .archive, sortOrder: base + 3, remoteID: "archive")
         let trash = MailFolder(accountID: stableID, name: "Deleted Items", kind: .trash, sortOrder: base + 4, remoteID: "deleteditems")
-        folders.append(contentsOf: [inbox, sent, drafts, archive, trash])
+        var newFolders = [inbox, sent, drafts, archive, trash]
+        // Callie's local Approve (hidden from per-account ladder; smart Approve aggregates kind == .approve).
+        if isCallie {
+            ensureApproveMailbox()
+            newFolders.append(
+                MailFolder(accountID: stableID, name: "Approve", kind: .approve, sortOrder: base + 5, isPinned: false, isSmart: false)
+            )
+        }
+        folders.append(contentsOf: newFolders)
         Office365SyncService.rememberAccount(email: trimmed, id: stableID)
         applyPersistedDisplayNames()
         return accounts.first { $0.id == stableID } ?? account
