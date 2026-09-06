@@ -81,6 +81,7 @@ final class DemoMailStore: MailStore {
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
         deduplicateLiveAccountShells()
+        enforceCalliopeExcludedFromUnifiedInbox()
         loadMessageCacheFromDisk()
         ensureApproveMailbox()
         injectApproveTestDraftIfNeeded()
@@ -96,7 +97,7 @@ final class DemoMailStore: MailStore {
         var list: [MailMessage]
         switch selection {
         case .unifiedInbox:
-            let included = Set(accounts.filter(\.includeInUnifiedInbox).map(\.id))
+            let included = Set(accounts.filter(\.contributesToUnifiedInbox).map(\.id))
             let inboxIDs = Set(folders.filter { $0.kind == .inbox && ($0.accountID.map(included.contains) ?? false) }.map(\.id))
             list = messages.filter { inboxIDs.contains($0.folderID) && $0.snoozeUntil == nil }
         case .approve:
@@ -292,7 +293,21 @@ final class DemoMailStore: MailStore {
 
     func setIncludeInUnifiedInbox(accountID: UUID, include: Bool) {
         guard let i = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        // Callie's account can never join One Inbox.
+        if accounts[i].isCalliopeMailbox {
+            accounts[i].isCalliope = true
+            accounts[i].includeInUnifiedInbox = false
+            return
+        }
         accounts[i].includeInUnifiedInbox = include
+    }
+
+    /// Force every Callie shell out of One Inbox (load / sync / settings save).
+    func enforceCalliopeExcludedFromUnifiedInbox() {
+        for i in accounts.indices where accounts[i].isCalliopeMailbox {
+            accounts[i].isCalliope = true
+            accounts[i].includeInUnifiedInbox = false
+        }
     }
 
     func updateSignature(accountID: UUID, signature: String) {
@@ -1040,6 +1055,7 @@ final class DemoMailStore: MailStore {
         defer {
             syncAllInFlight = false
             isUniversalSyncing = false
+            enforceCalliopeExcludedFromUnifiedInbox()
         }
         if hasGmail {
             await syncGmailNow()
@@ -1055,6 +1071,7 @@ final class DemoMailStore: MailStore {
         deduplicateMessagesByRemoteID()
         restoreGmailAccountShellIfNeeded()
         restoreOffice365AccountShellIfNeeded()
+        enforceCalliopeExcludedFromUnifiedInbox()
         applyPersistedDisplayNames()
         if let account = gmailAccount(), KeychainCredentialStore.hasCredentials(forEmail: account.email) {
             gmailNeedsSetup = false
@@ -1533,22 +1550,24 @@ final class DemoMailStore: MailStore {
                 keepByKey[key] = account.id
             }
         }
-        guard !removeIDs.isEmpty else { return }
-        let removeSet = Set(removeIDs)
-        accounts.removeAll { removeSet.contains($0.id) }
-        // Drop folders that collided onto an identical remoteID under the kept account.
-        var seenFolder = Set<String>()
-        folders = folders.filter { folder in
-            guard let aid = folder.accountID else { return true }
-            let remote = folder.remoteID ?? folder.id.uuidString
-            let key = aid.uuidString + "|" + remote
-            if seenFolder.contains(key) { return false }
-            seenFolder.insert(key)
-            return true
+        if !removeIDs.isEmpty {
+            let removeSet = Set(removeIDs)
+            accounts.removeAll { removeSet.contains($0.id) }
+            // Drop folders that collided onto an identical remoteID under the kept account.
+            var seenFolder = Set<String>()
+            folders = folders.filter { folder in
+                guard let aid = folder.accountID else { return true }
+                let remote = folder.remoteID ?? folder.id.uuidString
+                let key = aid.uuidString + "|" + remote
+                if seenFolder.contains(key) { return false }
+                seenFolder.insert(key)
+                return true
+            }
+            for (idx, _) in accounts.enumerated() {
+                accounts[idx].sortOrder = idx
+            }
         }
-        for (idx, _) in accounts.enumerated() {
-            accounts[idx].sortOrder = idx
-        }
+        enforceCalliopeExcludedFromUnifiedInbox()
     }
 
     private static func isCalliopeEmail(_ email: String) -> Bool {
@@ -1566,6 +1585,10 @@ final class DemoMailStore: MailStore {
             if let i = accounts.firstIndex(where: { $0.id == existing.id }) {
                 accounts[i].email = trimmed
                 accounts[i].isCalliope = isCallie || accounts[i].isCalliope
+                if accounts[i].isCalliopeMailbox {
+                    accounts[i].isCalliope = true
+                    accounts[i].includeInUnifiedInbox = false
+                }
                 if let override = MailDisplayNames.accountName(for: existing.id) {
                     accounts[i].name = override
                 } else if accounts[i].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1608,7 +1631,7 @@ final class DemoMailStore: MailStore {
             signature: isCallie
                 ? "Calliope Voss\nKale Yeah Inspections"
                 : "Derek Brown\nKale Yeah Inspections",
-            includeInUnifiedInbox: true,
+            includeInUnifiedInbox: !isCallie,
             isCalliope: isCallie,
             sortOrder: -1,
             inboxPinned: true,

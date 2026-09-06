@@ -679,14 +679,19 @@ struct SettingsView: View {
                     }
                     HStack(spacing: 16) {
                         Toggle("Include in One Inbox", isOn: Binding(
-                            get: { account.includeInUnifiedInbox },
+                            get: { account.isCalliopeMailbox ? false : account.includeInUnifiedInbox },
                             set: { store.setIncludeInUnifiedInbox(accountID: account.id, include: $0) }
                         ))
-                        .disabled(account.isCalliope)
+                        .disabled(account.isCalliopeMailbox)
                         Toggle("Pin", isOn: Binding(
                             get: { account.inboxPinned },
                             set: { store.setInboxPinned(accountID: account.id, pinned: $0) }
                         ))
+                    }
+                    if account.isCalliopeMailbox {
+                        Text("Callie stays in her own mailbox — open her ladder to see her mail.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding(.vertical, 4)
@@ -1070,6 +1075,7 @@ struct SettingsView: View {
     }
 
     private func persistSettingsBlob() {
+        store.enforceCalliopeExcludedFromUnifiedInbox()
         let existing = (try? modelContext.fetch(FetchDescriptor<PersistedAppSettings>())) ?? []
         let row = existing.first ?? PersistedAppSettings()
         if existing.isEmpty { modelContext.insert(row) }
@@ -1105,7 +1111,12 @@ struct SettingsView: View {
                     return existing.email == account.email
                 }
                 if let i = store.accounts.firstIndex(where: match) {
-                    store.accounts[i].includeInUnifiedInbox = account.includeInUnifiedInbox
+                    if store.accounts[i].isCalliopeMailbox || account.isCalliopeMailbox {
+                        store.accounts[i].isCalliope = true
+                        store.accounts[i].includeInUnifiedInbox = false
+                    } else {
+                        store.accounts[i].includeInUnifiedInbox = account.includeInUnifiedInbox
+                    }
                     // Prefer persisted signature when non-empty so edits survive relaunch.
                     if !account.signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         store.accounts[i].signature = account.signature
@@ -1121,6 +1132,7 @@ struct SettingsView: View {
             }
             store.accounts.sort { $0.sortOrder < $1.sortOrder }
             store.deduplicateLiveAccountShells()
+            store.enforceCalliopeExcludedFromUnifiedInbox()
         }
         if !persistedFlags.isEmpty {
             store.flags = persistedFlags.map { MailFlag(id: $0.id, name: $0.name, colorHex: $0.colorHex) }

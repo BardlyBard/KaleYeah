@@ -20,6 +20,16 @@ struct MailAccount: Identifiable, Hashable, Codable {
 
     var isLiveIMAP: Bool { isLiveGmail || isLiveOffice365 }
 
+    /// True when this shell is Callie's (flag or email).
+    var isCalliopeMailbox: Bool {
+        isCalliope || email.lowercased().contains("calliope")
+    }
+
+    /// Whether this account's Inbox folders should appear in One Inbox.
+    var contributesToUnifiedInbox: Bool {
+        includeInUnifiedInbox && !isCalliopeMailbox
+    }
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -40,8 +50,9 @@ struct MailAccount: Identifiable, Hashable, Codable {
         self.tintHex = tintHex
         self.signature = signature
         self.signatureLogoPath = signatureLogoPath
-        self.includeInUnifiedInbox = includeInUnifiedInbox
         self.isCalliope = isCalliope
+        // Callie's mailbox never feeds One Inbox (her ladder still shows her mail).
+        self.includeInUnifiedInbox = isCalliope ? false : includeInUnifiedInbox
         self.sortOrder = sortOrder
         self.inboxPinned = inboxPinned
         self.isLiveGmail = isLiveGmail
@@ -60,8 +71,10 @@ struct MailAccount: Identifiable, Hashable, Codable {
         tintHex = try c.decode(String.self, forKey: .tintHex)
         signature = try c.decodeIfPresent(String.self, forKey: .signature) ?? ""
         signatureLogoPath = try c.decodeIfPresent(String.self, forKey: .signatureLogoPath)
-        includeInUnifiedInbox = try c.decodeIfPresent(Bool.self, forKey: .includeInUnifiedInbox) ?? true
         isCalliope = try c.decodeIfPresent(Bool.self, forKey: .isCalliope) ?? false
+        let decodedInclude = try c.decodeIfPresent(Bool.self, forKey: .includeInUnifiedInbox) ?? true
+        // Persisted True for Callie must never survive load.
+        includeInUnifiedInbox = isCalliope ? false : decodedInclude
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         inboxPinned = try c.decodeIfPresent(Bool.self, forKey: .inboxPinned) ?? true
         isLiveGmail = try c.decodeIfPresent(Bool.self, forKey: .isLiveGmail) ?? false

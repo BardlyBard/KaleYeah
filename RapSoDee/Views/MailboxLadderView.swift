@@ -415,7 +415,7 @@ struct MailboxLadderView: View {
     private func unreadCount(for selection: LadderSelection) -> Int {
         switch selection {
         case .unifiedInbox:
-            let included = Set(store.accounts.filter(\.includeInUnifiedInbox).map(\.id))
+            let included = Set(store.accounts.filter(\.contributesToUnifiedInbox).map(\.id))
             let inboxIDs = Set(store.folders.filter {
                 $0.kind == .inbox && ($0.accountID.map(included.contains) ?? false)
             }.map(\.id))
