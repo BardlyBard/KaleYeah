@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import AppKit
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(DemoMailStore.self) private var store
@@ -29,22 +30,47 @@ struct SettingsView: View {
     @State private var addMicrosoft365Hint = MSALAppConfig.calliopeEmail
     @State private var showAdvancedMicrosoft = false
     @State private var emlImportAccountID: UUID?
+    @State private var settingsTab: SettingsTab = .accounts
+    @State private var signatureLogoError: String?
+
+    private enum SettingsTab: String, CaseIterable, Identifiable {
+        case accounts = "Accounts / setup"
+        case creature = "Creature features"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         NavigationStack {
-            Form {
-                accountsGmailSection
-                accountsMicrosoft365Section
-                syncSection
-                importEMLSection
-                oneInboxSection
-                appearanceSection
-                flagsSection
-                notificationsSection
-                aboutSection
+            VStack(spacing: 0) {
+                Picker("Settings section", selection: $settingsTab) {
+                    ForEach(SettingsTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                Form {
+                    switch settingsTab {
+                    case .accounts:
+                        accountsGmailSection
+                        accountsMicrosoft365Section
+                        syncSection
+                        importEMLSection
+                        aboutSection
+                    case .creature:
+                        oneInboxSection
+                        appearanceSection
+                        flagsSection
+                        notificationsSection
+                    }
+                }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(MuseTheme.paper.opacity(0.55))
             }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
             .background(MuseTheme.paper.opacity(0.55))
             .navigationTitle("Settings")
             .toolbar {
@@ -68,6 +94,7 @@ struct SettingsView: View {
                 msalTenantID = MSALAppConfig.tenantID
                 preferSMTPSend = MSALAppConfig.preferSMTPSend
                 MSALAuthService.shared.refreshSignedInStateFromCache()
+                store.restoreOffice365AccountShellIfNeeded()
                 if store.office365Accounts().contains(where: {
                     $0.email.lowercased() == Office365Defaults.defaultEmail.lowercased()
                 }) {
@@ -344,6 +371,14 @@ struct SettingsView: View {
                                 .background(MuseTheme.approveSoft)
                                 .clipShape(Capsule())
                         }
+                        if !MSALAuthService.shared.isSignedIn(email: account.email) {
+                            Text("Needs sign-in")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.25))
+                                .clipShape(Capsule())
+                        }
                     }
                     Text(account.email).font(.caption).foregroundStyle(.secondary)
                 }
@@ -353,15 +388,24 @@ struct SettingsView: View {
                 }
             }
             HStack(spacing: 10) {
-                Button("Sync") {
-                    Task {
-                        office365Busy = true
-                        defer { office365Busy = false }
-                        await store.syncOffice365Now()
+                if !MSALAuthService.shared.isSignedIn(email: account.email) {
+                    Button("Sign in…") {
+                        addMicrosoft365Hint = account.email
+                        showAddMicrosoft365 = true
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(office365Busy || store.office365IsSyncing)
+                } else {
+                    Button("Sync") {
+                        Task {
+                            office365Busy = true
+                            defer { office365Busy = false }
+                            await store.syncOffice365Now()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(office365Busy || store.office365IsSyncing)
                 }
-                .buttonStyle(.bordered)
-                .disabled(office365Busy || store.office365IsSyncing)
 
                 Button("Sign out", role: .destructive) {
                     Task {
@@ -683,16 +727,16 @@ struct SettingsView: View {
 
     private var appearanceSection: some View {
         Section {
-            Text("Permanent light mode is always on.")
+            Text("Permanent light mode is always on. Names, signatures, and tints are one row per mailbox (deduped).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if store.accounts.isEmpty {
+            if uniqueAccountsForDisplay.isEmpty {
                 Text("Connect Gmail or Microsoft 365 to rename accounts and mailboxes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ForEach(store.accounts) { account in
+            ForEach(uniqueAccountsForDisplay) { account in
                 TextField("Account name", text: Binding(
                     get: { account.name },
                     set: { store.renameAccount(accountID: account.id, name: $0) }
@@ -709,21 +753,28 @@ struct SettingsView: View {
                 }
             }
 
-            ForEach(store.accounts) { account in
-                VStack(alignment: .leading) {
-                    Text("\(account.name) signature").font(.headline)
+            ForEach(uniqueAccountsForDisplay) { account in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(accountDisplayTitle(account)) signature").font(.headline)
                     TextEditor(text: Binding(
                         get: { account.signature },
                         set: { store.updateSignature(accountID: account.id, signature: $0) }
                     ))
                     .font(.body)
                     .frame(minHeight: 64)
+                    signatureLogoControls(for: account)
                 }
             }
 
-            ForEach(store.accounts) { account in
+            if let signatureLogoError, !signatureLogoError.isEmpty {
+                Text(signatureLogoError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            ForEach(uniqueAccountsForDisplay) { account in
                 HStack {
-                    Text(account.name)
+                    Text(accountDisplayTitle(account))
                     Spacer()
                     TextField("Hex", text: Binding(
                         get: { account.tintHex },
@@ -734,7 +785,66 @@ struct SettingsView: View {
                 }
             }
         } header: {
-            Text("Appearance")
+            Text("Appearance & signatures")
+        }
+    }
+
+    @ViewBuilder
+    private func signatureLogoControls(for account: MailAccount) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            if let path = account.signatureLogoPath,
+               !path.isEmpty,
+               let data = AttachmentStore.load(path: path),
+               let nsImage = NSImage(data: data) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 72, height: 48)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Text("No logo")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 72, height: 48)
+                    .background(Color.secondary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Button("Choose logo…") {
+                    pickSignatureLogo(for: account.id)
+                }
+                .buttonStyle(.bordered)
+                if account.signatureLogoPath != nil {
+                    Button("Remove logo", role: .destructive) {
+                        signatureLogoError = nil
+                        store.updateSignatureLogo(accountID: account.id, path: nil)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Text("Small PNG/JPEG/GIF (≤512 KB). Included as HTML on send; plain text keeps the signature only.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func pickSignatureLogo(for accountID: UUID) {
+        signatureLogoError = nil
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP]
+        panel.message = "Choose a small signature logo"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let path = try SignatureLogoStore.importLogo(from: url, accountID: accountID)
+            store.updateSignatureLogo(accountID: accountID, path: path)
+        } catch {
+            signatureLogoError = error.localizedDescription
         }
     }
 
@@ -951,20 +1061,33 @@ struct SettingsView: View {
         store.notificationPolicyRaw = row.notificationPolicyRaw
         store.playSoundForNewMail = row.playSoundForNewMail
         if let data = row.accountsJSON, let accounts = try? JSONDecoder().decode([MailAccount].self, from: data) {
-            // Keep live message IDs; merge settings fields onto seeded accounts by email.
+            // Keep live message IDs; merge settings fields onto accounts by email (incl. live shells).
             for account in accounts {
-                if account.isLiveGmail || account.isLiveOffice365 {
-                    continue // live IMAP accounts are restored from Keychain / UserDefaults
+                let match: ((MailAccount) -> Bool) = { existing in
+                    if account.isLiveGmail || account.isLiveOffice365 {
+                        return existing.email.lowercased() == account.email.lowercased()
+                            && existing.isLiveGmail == account.isLiveGmail
+                            && existing.isLiveOffice365 == account.isLiveOffice365
+                    }
+                    return existing.email == account.email
                 }
-                if let i = store.accounts.firstIndex(where: { $0.email == account.email }) {
+                if let i = store.accounts.firstIndex(where: match) {
                     store.accounts[i].includeInUnifiedInbox = account.includeInUnifiedInbox
-                    store.accounts[i].signature = account.signature
+                    // Prefer persisted signature when non-empty so edits survive relaunch.
+                    if !account.signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        store.accounts[i].signature = account.signature
+                    }
+                    store.accounts[i].signatureLogoPath = account.signatureLogoPath ?? store.accounts[i].signatureLogoPath
                     store.accounts[i].tintHex = account.tintHex
                     store.accounts[i].inboxPinned = account.inboxPinned
                     store.accounts[i].sortOrder = account.sortOrder
+                } else if !(account.isLiveGmail || account.isLiveOffice365) {
+                    // Demo / non-live only — never invent duplicate live shells from JSON.
+                    continue
                 }
             }
             store.accounts.sort { $0.sortOrder < $1.sortOrder }
+            store.deduplicateLiveAccountShells()
         }
         if !persistedFlags.isEmpty {
             store.flags = persistedFlags.map { MailFlag(id: $0.id, name: $0.name, colorHex: $0.colorHex) }

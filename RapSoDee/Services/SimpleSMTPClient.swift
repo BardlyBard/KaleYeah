@@ -89,6 +89,7 @@ actor SimpleSMTPClient {
         cc: [String] = [],
         subject: String,
         body: String,
+        htmlBody: String? = nil,
         attachments: [OutboundAttachment] = []
     ) async throws {
         guard backend != nil else { throw MailNetError.unexpected("Not connected") }
@@ -119,21 +120,60 @@ actor SimpleSMTPClient {
         message += "MIME-Version: 1.0\r\n"
         message += "Date: \(rfc2822Now())\r\n"
 
-        if attachments.isEmpty {
+        let plain = body
+        let html = htmlBody
+        if attachments.isEmpty, html == nil {
             message += "Content-Type: text/plain; charset=utf-8\r\n"
             message += "Content-Transfer-Encoding: 8bit\r\n"
             message += "\r\n"
-            message += dotStuff(body)
-        } else {
-            let boundary = "rapsodee_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
-            message += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\r\n"
+            message += dotStuff(plain)
+        } else if attachments.isEmpty, let html {
+            let boundary = "rapsodee_alt_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            message += "Content-Type: multipart/alternative; boundary=\"\(boundary)\"\r\n"
             message += "\r\n"
             message += "--\(boundary)\r\n"
             message += "Content-Type: text/plain; charset=utf-8\r\n"
             message += "Content-Transfer-Encoding: 8bit\r\n"
             message += "\r\n"
-            message += dotStuff(body)
+            message += dotStuff(plain)
             message += "\r\n"
+            message += "--\(boundary)\r\n"
+            message += "Content-Type: text/html; charset=utf-8\r\n"
+            message += "Content-Transfer-Encoding: 8bit\r\n"
+            message += "\r\n"
+            message += dotStuff(html)
+            message += "\r\n"
+            message += "--\(boundary)--\r\n"
+        } else {
+            let boundary = "rapsodee_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            message += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\r\n"
+            message += "\r\n"
+            if let html {
+                let alt = "rapsodee_alt_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+                message += "--\(boundary)\r\n"
+                message += "Content-Type: multipart/alternative; boundary=\"\(alt)\"\r\n"
+                message += "\r\n"
+                message += "--\(alt)\r\n"
+                message += "Content-Type: text/plain; charset=utf-8\r\n"
+                message += "Content-Transfer-Encoding: 8bit\r\n"
+                message += "\r\n"
+                message += dotStuff(plain)
+                message += "\r\n"
+                message += "--\(alt)\r\n"
+                message += "Content-Type: text/html; charset=utf-8\r\n"
+                message += "Content-Transfer-Encoding: 8bit\r\n"
+                message += "\r\n"
+                message += dotStuff(html)
+                message += "\r\n"
+                message += "--\(alt)--\r\n"
+            } else {
+                message += "--\(boundary)\r\n"
+                message += "Content-Type: text/plain; charset=utf-8\r\n"
+                message += "Content-Transfer-Encoding: 8bit\r\n"
+                message += "\r\n"
+                message += dotStuff(plain)
+                message += "\r\n"
+            }
             for att in attachments {
                 let safeName = att.filename.replacingOccurrences(of: "\"", with: "")
                 message += "--\(boundary)\r\n"

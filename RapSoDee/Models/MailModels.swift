@@ -7,6 +7,8 @@ struct MailAccount: Identifiable, Hashable, Codable {
     var email: String
     var tintHex: String
     var signature: String
+    /// Absolute path to a small logo image stored with this signature (Application Support).
+    var signatureLogoPath: String?
     var includeInUnifiedInbox: Bool
     var isCalliope: Bool
     var sortOrder: Int
@@ -24,6 +26,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
         email: String,
         tintHex: String,
         signature: String = "",
+        signatureLogoPath: String? = nil,
         includeInUnifiedInbox: Bool = true,
         isCalliope: Bool = false,
         sortOrder: Int = 0,
@@ -36,6 +39,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
         self.email = email
         self.tintHex = tintHex
         self.signature = signature
+        self.signatureLogoPath = signatureLogoPath
         self.includeInUnifiedInbox = includeInUnifiedInbox
         self.isCalliope = isCalliope
         self.sortOrder = sortOrder
@@ -45,7 +49,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, email, tintHex, signature, includeInUnifiedInbox, isCalliope, sortOrder, inboxPinned, isLiveGmail, isLiveOffice365
+        case id, name, email, tintHex, signature, signatureLogoPath, includeInUnifiedInbox, isCalliope, sortOrder, inboxPinned, isLiveGmail, isLiveOffice365
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +59,7 @@ struct MailAccount: Identifiable, Hashable, Codable {
         email = try c.decode(String.self, forKey: .email)
         tintHex = try c.decode(String.self, forKey: .tintHex)
         signature = try c.decodeIfPresent(String.self, forKey: .signature) ?? ""
+        signatureLogoPath = try c.decodeIfPresent(String.self, forKey: .signatureLogoPath)
         includeInUnifiedInbox = try c.decodeIfPresent(Bool.self, forKey: .includeInUnifiedInbox) ?? true
         isCalliope = try c.decodeIfPresent(Bool.self, forKey: .isCalliope) ?? false
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0

@@ -33,7 +33,25 @@ struct ComposeView: View {
                         .fill(MuseTheme.paperFill(scheme: colorScheme))
                 )
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.top, 10)
+            if let logoPath = store.account(for: draft.accountID)?.signatureLogoPath,
+               let data = AttachmentStore.load(path: logoPath),
+               let image = NSImage(data: data) {
+                HStack(spacing: 10) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 48)
+                    Text("Signature logo (included on send)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            } else {
+                Spacer().frame(height: 10)
+            }
             Divider().opacity(0.4)
             if let sendError, !sendError.isEmpty {
                 Text(sendError)
@@ -152,9 +170,15 @@ struct ComposeView: View {
                     Text(composeFromLabel(account)).tag(account.email)
                 }
             }
-            .onChange(of: draft.fromAddress) { _, newValue in
+            .onChange(of: draft.fromAddress) { oldValue, newValue in
+                let oldAccount = store.accounts.first { $0.email.lowercased() == oldValue.lowercased() }
                 if let account = store.accounts.first(where: { $0.email.lowercased() == newValue.lowercased() }) {
                     draft.accountID = account.id
+                    draft.body = MailSignatureFormatting.replaceSignature(
+                        in: draft.body,
+                        old: oldAccount?.signature,
+                        new: account.signature
+                    )
                 }
             }
             TextField("To", text: $draft.to)

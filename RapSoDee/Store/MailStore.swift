@@ -29,6 +29,7 @@ protocol MailStore: AnyObject {
     func setInboxPinned(accountID: UUID, pinned: Bool)
     func setIncludeInUnifiedInbox(accountID: UUID, include: Bool)
     func updateSignature(accountID: UUID, signature: String)
+    func updateSignatureLogo(accountID: UUID, path: String?)
     func updateAccountTint(accountID: UUID, hex: String)
 
     func upsertFlag(_ flag: MailFlag)

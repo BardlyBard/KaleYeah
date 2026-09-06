@@ -204,12 +204,15 @@ enum IMAPAccountSyncService {
         email: String,
         password: String,
         draft: ComposeDraft,
-        signature: String?
+        signature: String?,
+        signatureLogoPath: String? = nil
     ) async throws {
-        var body = draft.body
-        if let signature, !signature.isEmpty, !body.contains(signature) {
-            body += "\n\n--\n" + signature
-        }
+        let rendered = MailSignatureFormatting.outboundBody(
+            draftBody: draft.body,
+            signature: signature,
+            logoPath: signatureLogoPath
+        )
+        let plain = MailSignatureFormatting.appendPlainIfNeeded(body: draft.body, signature: signature)
         let to = draft.to.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let cc = draft.cc.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let smtp = SimpleSMTPClient()
@@ -226,7 +229,8 @@ enum IMAPAccountSyncService {
             to: to,
             cc: cc,
             subject: draft.subject,
-            body: body,
+            body: plain,
+            htmlBody: rendered.isHTML ? rendered.content : nil,
             attachments: outbound
         )
         await smtp.quit()

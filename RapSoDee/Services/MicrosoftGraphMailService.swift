@@ -445,12 +445,16 @@ enum MicrosoftGraphMailService {
         draft: ComposeDraft,
         fromEmail: String,
         mailboxEmail: String,
-        signature: String?
+        signature: String?,
+        signatureLogoPath: String? = nil
     ) async throws -> String {
-        var bodyText = draft.body
-        if let signature, !signature.isEmpty, !bodyText.contains(signature) {
-            bodyText += "\n\n--\n" + signature
-        }
+        let outbound = MailSignatureFormatting.outboundBody(
+            draftBody: draft.body,
+            signature: signature,
+            logoPath: signatureLogoPath
+        )
+        let bodyText = outbound.content
+        let bodyIsHTML = outbound.isHTML
         let to = parseAddressList(draft.to)
         let cc = parseAddressList(draft.cc)
         guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
@@ -468,6 +472,7 @@ enum MicrosoftGraphMailService {
                 replyAll: false,
                 subject: draft.subject,
                 bodyText: bodyText,
+                bodyIsHTML: bodyIsHTML,
                 to: to,
                 cc: cc,
                 attachments: draft.attachments
@@ -488,6 +493,7 @@ enum MicrosoftGraphMailService {
                 replyAll: true,
                 subject: draft.subject,
                 bodyText: bodyText,
+                bodyIsHTML: bodyIsHTML,
                 to: to,
                 cc: cc,
                 attachments: draft.attachments
@@ -504,6 +510,7 @@ enum MicrosoftGraphMailService {
             accessToken: accessToken,
             subject: draft.subject,
             bodyText: bodyText,
+            bodyIsHTML: bodyIsHTML,
             to: to,
             cc: cc,
             attachments: draft.attachments,
@@ -522,6 +529,7 @@ enum MicrosoftGraphMailService {
         accessToken: String,
         subject: String,
         bodyText: String,
+        bodyIsHTML: Bool = false,
         to: [String],
         cc: [String],
         attachments: [ComposeAttachment],
@@ -530,7 +538,7 @@ enum MicrosoftGraphMailService {
         var messageObj: [String: Any] = [
             "subject": subject,
             "body": [
-                "contentType": "Text",
+                "contentType": bodyIsHTML ? "HTML" : "Text",
                 "content": bodyText,
             ],
             "toRecipients": recipientObjects(to),
@@ -566,22 +574,26 @@ enum MicrosoftGraphMailService {
         accessToken: String,
         mailboxEmail: String,
         draft: ComposeDraft,
-        signature: String?
+        signature: String?,
+        signatureLogoPath: String? = nil
     ) async throws -> String {
-        var bodyText = draft.body
-        if let signature, !signature.isEmpty, !bodyText.contains(signature) {
-            bodyText += "\n\n--\n" + signature
-        }
+        let rendered = MailSignatureFormatting.outboundBody(
+            draftBody: draft.body,
+            signature: signature,
+            logoPath: signatureLogoPath
+        )
+        let bodyText = rendered.content
+        let bodyIsHTML = rendered.isHTML
         let to = parseAddressList(draft.to)
         let cc = parseAddressList(draft.cc)
         guard !to.isEmpty else { throw GraphError.unexpected("Add at least one To recipient") }
         let mailbox = mailboxEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !mailbox.isEmpty else { throw GraphError.unexpected("No mailbox email for SMTP send") }
 
-        var outbound: [SimpleSMTPClient.OutboundAttachment] = []
+        var smtpAttachments: [SimpleSMTPClient.OutboundAttachment] = []
         for att in draft.attachments {
             guard let data = AttachmentStore.load(path: att.localPath) else { continue }
-            outbound.append(
+            smtpAttachments.append(
                 .init(
                     filename: att.filename,
                     mimeType: att.mimeType.isEmpty ? "application/octet-stream" : att.mimeType,
@@ -603,8 +615,9 @@ enum MicrosoftGraphMailService {
                 to: to,
                 cc: cc,
                 subject: draft.subject,
-                body: bodyText,
-                attachments: outbound
+                body: bodyIsHTML ? MailSignatureFormatting.appendPlainIfNeeded(body: draft.body, signature: signature) : bodyText,
+                htmlBody: bodyIsHTML ? bodyText : nil,
+                attachments: smtpAttachments
             )
             await smtp.quit()
         } catch {
@@ -625,6 +638,7 @@ enum MicrosoftGraphMailService {
         replyAll: Bool,
         subject: String,
         bodyText: String,
+        bodyIsHTML: Bool = false,
         to: [String],
         cc: [String],
         attachments: [ComposeAttachment]
@@ -643,7 +657,7 @@ enum MicrosoftGraphMailService {
         let patch: [String: Any] = [
             "subject": subject,
             "body": [
-                "contentType": "Text",
+                "contentType": bodyIsHTML ? "HTML" : "Text",
                 "content": bodyText,
             ],
             "toRecipients": recipientObjects(to),

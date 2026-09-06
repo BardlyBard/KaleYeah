@@ -58,13 +58,14 @@ enum GmailSyncService {
         )
     }
 
-    static func send(email: String, password: String, draft: ComposeDraft, signature: String?) async throws {
+    static func send(email: String, password: String, draft: ComposeDraft, signature: String?, signatureLogoPath: String? = nil) async throws {
         try await IMAPAccountSyncService.send(
             provider: provider,
             email: email,
             password: password,
             draft: draft,
-            signature: signature
+            signature: signature,
+            signatureLogoPath: signatureLogoPath
         )
     }
 
@@ -192,13 +193,14 @@ enum Office365SyncService {
         )
     }
 
-    static func send(email: String, password: String, draft: ComposeDraft, signature: String?) async throws {
+    static func send(email: String, password: String, draft: ComposeDraft, signature: String?, signatureLogoPath: String? = nil) async throws {
         try await IMAPAccountSyncService.send(
             provider: provider,
             email: email,
             password: password,
             draft: draft,
-            signature: signature
+            signature: signature,
+            signatureLogoPath: signatureLogoPath
         )
     }
 }

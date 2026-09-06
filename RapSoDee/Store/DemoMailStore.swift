@@ -291,6 +291,15 @@ final class DemoMailStore: MailStore {
         accounts[i].signature = signature
     }
 
+    func updateSignatureLogo(accountID: UUID, path: String?) {
+        guard let i = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        let previous = accounts[i].signatureLogoPath
+        accounts[i].signatureLogoPath = path
+        if let previous, previous != path {
+            SignatureLogoStore.removeLogo(at: previous)
+        }
+    }
+
     func updateAccountTint(accountID: UUID, hex: String) {
         guard let i = accounts.firstIndex(where: { $0.id == accountID }) else { return }
         accounts[i].tintHex = hex
@@ -539,12 +548,10 @@ final class DemoMailStore: MailStore {
         let ccList = parseComposeAddresses(draft.cc)
         let includesSelf = draftIncludesSelf(draft, selfEmail: selfEmail)
 
-        let bodyWithSig: String
-        if let sig = live?.signature, !sig.isEmpty, !draft.body.contains(sig) {
-            bodyWithSig = draft.body + "\n\n--\n" + sig
-        } else {
-            bodyWithSig = draft.body
-        }
+        let bodyWithSig = MailSignatureFormatting.appendPlainIfNeeded(
+            body: draft.body,
+            signature: live?.signature
+        )
         let attachments = draft.attachments.map {
             MailAttachment(
                 id: $0.id,
@@ -1211,7 +1218,8 @@ final class DemoMailStore: MailStore {
                 email: account.email,
                 password: password,
                 draft: draft,
-                signature: account.signature
+                signature: account.signature,
+                signatureLogoPath: account.signatureLogoPath
             )
             upsertOptimisticOutbound(draft)
             gmailSyncStatus = "Sent via Gmail SMTP → \(to.prefix(2).joined(separator: ", "))"
@@ -1259,14 +1267,21 @@ final class DemoMailStore: MailStore {
         }
         for email in Self.uniqueEmailList(candidateEmails) {
             let lower = email.lowercased()
+            let isCallie = Self.isCalliopeEmail(email)
             // Prefer shells when we still hold a token OR we previously remembered the account.
+            // Callie always gets a planned shell so she stays visible while re-auth is pending.
             let hasToken = MSALAuthService.shared.isSignedIn(email: email)
             let remembered = planned.contains(where: { $0.email.lowercased() == lower })
                 || MSALAppConfig.rememberedSignedInEmails.contains(where: { $0.lowercased() == lower })
-            guard hasToken || remembered else { continue }
+            guard isCallie || hasToken || remembered else { continue }
             if !planned.contains(where: { $0.email.lowercased() == lower }) {
                 planned.append(RememberedOffice365Account(email: email, id: UUID()))
             }
+        }
+        // Always keep Callie's mailbox row — never hide her for missing token.
+        let callie = MSALAppConfig.calliopeEmail
+        if !planned.contains(where: { $0.email.lowercased() == callie.lowercased() }) {
+            planned.append(RememberedOffice365Account(email: callie, id: UUID()))
         }
         guard !planned.isEmpty else {
             deduplicateLiveAccountShells()
@@ -1274,15 +1289,17 @@ final class DemoMailStore: MailStore {
         }
         for remembered in planned {
             if accounts.contains(where: { $0.isLiveOffice365 && $0.email.lowercased() == remembered.email.lowercased() }) {
+                _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
                 continue
             }
-            // Only create a new shell when a token exists or the account was explicitly remembered.
+            let isCallie = Self.isCalliopeEmail(remembered.email)
+            // Only create a new shell when a token exists, the account was remembered, or it's Callie.
             let hasToken = MSALAuthService.shared.isSignedIn(email: remembered.email)
             let wasRemembered = Office365SyncService.rememberedAccounts()
                 .contains(where: { $0.email.lowercased() == remembered.email.lowercased() })
                 || MSALAppConfig.rememberedSignedInEmails
                 .contains(where: { $0.lowercased() == remembered.email.lowercased() })
-            guard hasToken || wasRemembered else { continue }
+            guard isCallie || hasToken || wasRemembered else { continue }
             _ = ensureOffice365Account(email: remembered.email, id: remembered.id)
         }
         deduplicateLiveAccountShells()
@@ -1647,16 +1664,28 @@ final class DemoMailStore: MailStore {
             office365LastError = nil
             return
         }
+        var keepCallieShell = false
         for account in targets {
+            let isCallie = Self.isCalliopeEmail(account.email)
             await MSALAuthService.shared.signOut(email: account.email)
             KeychainCredentialStore.deletePassword(forEmail: account.email)
-            Office365SyncService.forgetAccount(email: account.email)
-            messages.removeAll { $0.accountID == account.id }
-            folders.removeAll { $0.accountID == account.id }
-            accounts.removeAll { $0.id == account.id }
+            if isCallie {
+                // Keep Callie's mailbox row visible so she can re-auth without disappearing.
+                keepCallieShell = true
+                Office365SyncService.rememberAccount(email: account.email, id: account.id)
+                messages.removeAll { $0.accountID == account.id }
+            } else {
+                Office365SyncService.forgetAccount(email: account.email)
+                messages.removeAll { $0.accountID == account.id }
+                folders.removeAll { $0.accountID == account.id }
+                accounts.removeAll { $0.id == account.id }
+            }
         }
         for (idx, _) in accounts.enumerated() {
             accounts[idx].sortOrder = idx
+        }
+        if keepCallieShell {
+            restoreOffice365AccountShellIfNeeded()
         }
         office365NeedsSetup = office365Accounts().isEmpty
         office365SyncStatus = targets.count == 1
@@ -2185,7 +2214,8 @@ final class DemoMailStore: MailStore {
             draft: draft,
             fromEmail: fromEmail,
             mailboxEmail: account.email,
-            signature: account.signature
+            signature: account.signature,
+            signatureLogoPath: account.signatureLogoPath
         )
     }
 
@@ -2311,7 +2341,8 @@ final class DemoMailStore: MailStore {
             accessToken: smtpToken,
             mailboxEmail: account.email,
             draft: draft,
-            signature: account.signature
+            signature: account.signature,
+            signatureLogoPath: account.signatureLogoPath
         )
     }
 

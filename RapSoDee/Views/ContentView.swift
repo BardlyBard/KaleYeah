@@ -283,7 +283,7 @@ struct ContentView: View {
                     accountID: UUID()
                 )
             }
-            let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
+            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
             return ComposeDraft(
                 mode: .new,
                 fromAddress: account.email,
@@ -296,7 +296,7 @@ struct ContentView: View {
         case .reply(let message):
             let account = store.account(for: message.accountID) ?? store.accounts.first!
             let from = message.deliveredTo
-            let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
+            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
             return ComposeDraft(
                 mode: mode,
                 fromAddress: from,
@@ -314,7 +314,7 @@ struct ContentView: View {
             var recipients = ([message.fromAddress] + message.toAddresses + message.ccAddresses)
                 .filter { $0.lowercased() != from.lowercased() }
             recipients = Array(Set(recipients)).sorted()
-            let sig = account.signature.isEmpty ? "" : "\n\n--\n\(account.signature)"
+            let sig = MailSignatureFormatting.plainBlock(signature: account.signature)
             return ComposeDraft(
                 mode: mode,
                 fromAddress: from,
