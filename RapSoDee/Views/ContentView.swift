@@ -527,6 +527,29 @@ struct ContentView: View {
             store.flags = existing
                 .sorted { $0.sortOrder < $1.sortOrder }
                 .map { MailFlag(id: $0.id, name: $0.name, colorHex: $0.colorHex) }
+            // Soft-rename stock color labels → RapSoDee follow-up names (only exact legacy names).
+            let legacy: [String: String] = [
+                "Red": "Very Urgent",
+                "Orange": "Urgent",
+                "Yellow": "To Do",
+                "Green": "Money Matters",
+                "Blue": "Information",
+                "Purple": "Education",
+            ]
+            var renamed = false
+            for i in store.flags.indices {
+                if let better = legacy[store.flags[i].name] {
+                    store.flags[i].name = better
+                    renamed = true
+                }
+            }
+            if renamed {
+                for row in existing { modelContext.delete(row) }
+                for (i, flag) in store.flags.enumerated() {
+                    modelContext.insert(PersistedFlag(id: flag.id, name: flag.name, colorHex: flag.colorHex, sortOrder: i))
+                }
+                try? modelContext.save()
+            }
             store.lastUsedFlagID = store.flags.first?.id
         }
     }

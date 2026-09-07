@@ -13,6 +13,14 @@ final class DemoMailStore: MailStore {
     var lastUsedFlagID: UUID?
     var sort: MessageSort = .dateNewest
     var filter: MessageFilter = .all
+    /// Date refinement — composes with `filter` (All / Unread / Flagged / Attachments).
+    var dateFilter: MessageDateFilter = .any
+    var dateCustomStart: Date = Calendar.current.startOfDay(for: Date())
+    var dateCustomEnd: Date = Date()
+    /// When set, only messages with this RapSoDee flag color/name.
+    var flagFilterID: UUID? = nil
+    /// When set, only messages carrying this light local tag.
+    var tagFilter: String? = nil
     var searchText: String = ""
     /// Stage-1 notification stub — focusAware / vipOnly / mute
     var notificationPolicyRaw: String = "focusAware"
@@ -147,6 +155,15 @@ final class DemoMailStore: MailStore {
         case .hasAttachments: list = list.filter { !$0.paperclipAttachments.isEmpty }
         }
 
+        list = applyDateFilter(list)
+        if let flagID = flagFilterID {
+            list = list.filter { $0.isFlagged && $0.flagID == flagID }
+        }
+        if let tag = tagFilter?.trimmingCharacters(in: .whitespacesAndNewlines), !tag.isEmpty {
+            let needle = tag.lowercased()
+            list = list.filter { $0.tags.contains { $0.lowercased() == needle } }
+        }
+
         switch sort {
         case .dateNewest: list.sort { $0.receivedAt > $1.receivedAt }
         case .dateOldest: list.sort { $0.receivedAt < $1.receivedAt }
@@ -154,6 +171,60 @@ final class DemoMailStore: MailStore {
         case .subject: list.sort { $0.subject.localizedCaseInsensitiveCompare($1.subject) == .orderedAscending }
         }
         return list
+    }
+
+
+    /// True when any date / flag-color / tag refinement is active (not the All/Unread/… picker).
+    var hasListRefinements: Bool {
+        dateFilter != .any || flagFilterID != nil || !(tagFilter?.isEmpty ?? true)
+    }
+
+    func clearListRefinements() {
+        dateFilter = .any
+        flagFilterID = nil
+        tagFilter = nil
+        dateCustomStart = Calendar.current.startOfDay(for: Date())
+        dateCustomEnd = Date()
+    }
+
+    /// Distinct tags present in a message set (for the Tags filter menu).
+    func availableTags(in messages: [MailMessage]) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for msg in messages {
+            for tag in msg.tags {
+                let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                let key = trimmed.lowercased()
+                if seen.insert(key).inserted {
+                    ordered.append(trimmed)
+                }
+            }
+        }
+        return ordered.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func applyDateFilter(_ list: [MailMessage]) -> [MailMessage] {
+        let cal = Calendar.current
+        let now = Date()
+        switch dateFilter {
+        case .any:
+            return list
+        case .today:
+            let start = cal.startOfDay(for: now)
+            return list.filter { $0.receivedAt >= start }
+        case .last7:
+            guard let start = cal.date(byAdding: .day, value: -7, to: now) else { return list }
+            return list.filter { $0.receivedAt >= start }
+        case .last30:
+            guard let start = cal.date(byAdding: .day, value: -30, to: now) else { return list }
+            return list.filter { $0.receivedAt >= start }
+        case .custom:
+            let start = cal.startOfDay(for: min(dateCustomStart, dateCustomEnd))
+            let endDay = cal.startOfDay(for: max(dateCustomStart, dateCustomEnd))
+            let end = cal.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? endDay
+            return list.filter { $0.receivedAt >= start && $0.receivedAt <= end }
+        }
     }
 
     func markRead(_ id: UUID, read: Bool) {
@@ -199,7 +270,27 @@ final class DemoMailStore: MailStore {
         }
     }
 
-    func flagShortcut(_ id: UUID) {
+    
+    func toggleTag(_ id: UUID, tag: String) {
+        guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let existing = messages[i].tags.firstIndex(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            messages[i].tags.remove(at: existing)
+        } else {
+            messages[i].tags.append(trimmed)
+        }
+        persistMessageCache()
+    }
+
+    func clearTags(_ id: UUID) {
+        guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard !messages[i].tags.isEmpty else { return }
+        messages[i].tags = []
+        persistMessageCache()
+    }
+
+func flagShortcut(_ id: UUID) {
         guard let message = messages.first(where: { $0.id == id }) else { return }
         if message.isFlagged {
             setFlag(id, flagID: nil)
@@ -3446,6 +3537,10 @@ final class DemoMailStore: MailStore {
                 if let until = local.snoozeUntil {
                     incoming.snoozeUntil = until
                     incoming.folderID = local.folderID
+                }
+                // Preserve light local tags (server has no RapSoDee tags).
+                if !local.tags.isEmpty {
+                    incoming.tags = local.tags
                 }
                 // Keep local mark-read until Graph/IMAP PATCH lands.
                 if local.isRead && !incoming.isRead {

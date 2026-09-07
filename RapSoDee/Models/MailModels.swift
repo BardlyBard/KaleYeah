@@ -230,14 +230,14 @@ struct MailFlag: Identifiable, Hashable, Codable {
         self.colorHex = colorHex
     }
 
-    /// Default named flags (Apple Mail–style palette). Editable in Settings.
+    /// Default named flags (RapSoDee follow-up palette). Editable in Settings.
     static let defaults: [MailFlag] = [
-        MailFlag(name: "Red", colorHex: "E23B3B"),
-        MailFlag(name: "Orange", colorHex: "E07A3D"),
-        MailFlag(name: "Yellow", colorHex: "D4A017"),
-        MailFlag(name: "Green", colorHex: "1F8A5B"),
-        MailFlag(name: "Blue", colorHex: "3B7DD8"),
-        MailFlag(name: "Purple", colorHex: "7B5EA7"),
+        MailFlag(name: "Very Urgent", colorHex: "E23B3B"),
+        MailFlag(name: "Urgent", colorHex: "E07A3D"),
+        MailFlag(name: "To Do", colorHex: "D4A017"),
+        MailFlag(name: "Money Matters", colorHex: "1F8A5B"),
+        MailFlag(name: "Information", colorHex: "3B7DD8"),
+        MailFlag(name: "Education", colorHex: "7B5EA7"),
         MailFlag(name: "Gray", colorHex: "8E8E93"),
     ]
 }
@@ -263,6 +263,8 @@ struct MailMessage: Identifiable, Hashable, Codable, Sendable {
     var isRead: Bool
     var isFlagged: Bool
     var flagID: UUID?
+    /// Light local tags (RapSoDee-only). Empty until assigned; filter UI appears when any exist.
+    var tags: [String]
     var snoozeUntil: Date?
     var attachments: [MailAttachment]
     var deliveredTo: String
@@ -289,6 +291,7 @@ struct MailMessage: Identifiable, Hashable, Codable, Sendable {
         isRead: Bool = false,
         isFlagged: Bool = false,
         flagID: UUID? = nil,
+        tags: [String] = [],
         snoozeUntil: Date? = nil,
         attachments: [MailAttachment] = [],
         deliveredTo: String,
@@ -312,6 +315,7 @@ struct MailMessage: Identifiable, Hashable, Codable, Sendable {
         self.isRead = isRead
         self.isFlagged = isFlagged
         self.flagID = flagID
+        self.tags = tags
         self.snoozeUntil = snoozeUntil
         self.attachments = attachments
         self.deliveredTo = deliveredTo
@@ -323,7 +327,7 @@ struct MailMessage: Identifiable, Hashable, Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, accountID, folderID, fromName, fromAddress, toAddresses, ccAddresses
-        case subject, snippet, body, isHTML, receivedAt, isRead, isFlagged, flagID
+        case subject, snippet, body, isHTML, receivedAt, isRead, isFlagged, flagID, tags
         case snoozeUntil, attachments, deliveredTo, disposition, isDraft, remoteID, internetMessageId
     }
 
@@ -344,6 +348,7 @@ struct MailMessage: Identifiable, Hashable, Codable, Sendable {
         isRead = try c.decode(Bool.self, forKey: .isRead)
         isFlagged = try c.decode(Bool.self, forKey: .isFlagged)
         flagID = try c.decodeIfPresent(UUID.self, forKey: .flagID)
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         snoozeUntil = try c.decodeIfPresent(Date.self, forKey: .snoozeUntil)
         attachments = try c.decodeIfPresent([MailAttachment].self, forKey: .attachments) ?? []
         deliveredTo = try c.decode(String.self, forKey: .deliveredTo)
@@ -376,6 +381,21 @@ enum MessageFilter: String, CaseIterable, Identifiable, Codable, Sendable {
         case .unread: return "Unread"
         case .flagged: return "Flagged"
         case .hasAttachments: return "Has attachments"
+        }
+    }
+}
+
+/// Date refinement for the message list — composes with `MessageFilter`.
+enum MessageDateFilter: String, CaseIterable, Identifiable, Codable, Sendable {
+    case any, today, last7, last30, custom
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .any: return "Any date"
+        case .today: return "Today"
+        case .last7: return "Last 7 days"
+        case .last30: return "Last 30 days"
+        case .custom: return "Custom range"
         }
     }
 }

@@ -5,6 +5,9 @@ import ObjectiveC
 #endif
 
 struct MessageListView: View {
+    /// Light local tag suggestions (RapSoDee-only; not server labels).
+    fileprivate static let suggestedLightTags = ["Follow-up", "Waiting", "Personal", "Work"]
+
     @Environment(DemoMailStore.self) private var store
     @Environment(MailDragController.self) private var mailDrag
     @Environment(\.colorScheme) private var colorScheme
@@ -127,33 +130,220 @@ struct MessageListView: View {
     }
 
     private var filterBar: some View {
-        HStack(spacing: 8) {
-            Picker("Sort", selection: Bindable(store).sort) {
-                ForEach(MessageSort.allCases) { sort in
-                    Text(sort.label).tag(sort)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Picker("Sort", selection: Bindable(store).sort) {
+                    ForEach(MessageSort.allCases) { sort in
+                        Text(sort.label).tag(sort)
+                    }
                 }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 160)
+                .labelsHidden()
+                .frame(maxWidth: 160)
+                .help("Sort")
 
-            Picker("Filter", selection: Bindable(store).filter) {
-                ForEach(MessageFilter.allCases) { filter in
-                    Text(filter.label).tag(filter)
+                Picker("Filter", selection: Bindable(store).filter) {
+                    ForEach(MessageFilter.allCases) { filter in
+                        Text(filter.label).tag(filter)
+                    }
                 }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 140)
+                .labelsHidden()
+                .frame(maxWidth: 140)
+                .help("All / Unread / Flagged / Attachments")
 
-            Spacer()
-            Text("\(messages.count)")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(MuseTheme.sage.opacity(0.8), in: Capsule())
+                dateFilterMenu
+                flagFilterMenu
+                if !availableTagsForMenu.isEmpty {
+                    tagFilterMenu
+                }
+
+                if store.hasListRefinements || store.filter != .all {
+                    Button("Clear") {
+                        store.filter = .all
+                        store.clearListRefinements()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(MuseTheme.leaf)
+                    .help("Clear list filters")
+                }
+
+                Spacer(minLength: 0)
+                Text("\(messages.count)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(MuseTheme.sage.opacity(0.8), in: Capsule())
+            }
+
+            if store.dateFilter == .custom {
+                customDateRangeRow
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private var availableTagsForMenu: [String] {
+        store.availableTags(in: store.messages)
+    }
+
+    private var dateFilterMenu: some View {
+        Menu {
+            ForEach(MessageDateFilter.allCases) { preset in
+                Button {
+                    store.dateFilter = preset
+                } label: {
+                    HStack {
+                        Text(preset.label)
+                        if store.dateFilter == preset {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            filterChipLabel(
+                title: store.dateFilter == .any ? "Date" : store.dateFilter.label,
+                systemImage: "calendar",
+                active: store.dateFilter != .any
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("Filter by date")
+    }
+
+    private var flagFilterMenu: some View {
+        Menu {
+            Button {
+                store.flagFilterID = nil
+            } label: {
+                HStack {
+                    Text("Any flag")
+                    if store.flagFilterID == nil {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            if !store.flags.isEmpty {
+                Divider()
+            }
+            ForEach(store.flags) { flag in
+                Button {
+                    store.flagFilterID = flag.id
+                    // Flag-color refine implies looking at flagged mail; keep All so unread/attachments still compose.
+                } label: {
+                    HStack {
+                        #if os(macOS)
+                        Image(nsImage: FlagSwatch.circleImage(hex: flag.colorHex))
+                        #endif
+                        Text(flag.name)
+                        if store.flagFilterID == flag.id {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            filterChipLabel(
+                title: activeFlagFilterName ?? "Flags",
+                systemImage: "flag",
+                active: store.flagFilterID != nil
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("Filter by RapSoDee flag color")
+    }
+
+    private var activeFlagFilterName: String? {
+        guard let id = store.flagFilterID else { return nil }
+        return store.flags.first(where: { $0.id == id })?.name
+    }
+
+    private var tagFilterMenu: some View {
+        Menu {
+            Button {
+                store.tagFilter = nil
+            } label: {
+                HStack {
+                    Text("Any tag")
+                    if store.tagFilter == nil || store.tagFilter?.isEmpty == true {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Divider()
+            ForEach(availableTagsForMenu, id: \.self) { tag in
+                Button {
+                    store.tagFilter = tag
+                } label: {
+                    HStack {
+                        Text(tag)
+                        if store.tagFilter?.lowercased() == tag.lowercased() {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            filterChipLabel(
+                title: (store.tagFilter?.isEmpty == false) ? (store.tagFilter ?? "Tags") : "Tags",
+                systemImage: "tag",
+                active: store.tagFilter?.isEmpty == false
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("Filter by tag")
+    }
+
+    private var customDateRangeRow: some View {
+        HStack(spacing: 10) {
+            Text("From")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            DatePicker(
+                "",
+                selection: Bindable(store).dateCustomStart,
+                displayedComponents: .date
+            )
+            .labelsHidden()
+            .datePickerStyle(.compact)
+
+            Text("to")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            DatePicker(
+                "",
+                selection: Bindable(store).dateCustomEnd,
+                displayedComponents: .date
+            )
+            .labelsHidden()
+            .datePickerStyle(.compact)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func filterChipLabel(title: String, systemImage: String, active: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.caption)
+            Text(title)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(active ? MuseTheme.leaf.opacity(0.18) : MuseTheme.sage.opacity(0.9))
+        )
+        .foregroundStyle(active ? MuseTheme.leaf : MuseTheme.ink.opacity(0.85))
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(active ? MuseTheme.leaf.opacity(0.35) : MuseTheme.oatmeal.opacity(0.35), lineWidth: 1)
+        }
     }
 
     private var bulkActionBar: some View {
@@ -307,6 +497,15 @@ struct MessageListView: View {
                 onClear: { store.setFlag(message.id, flagID: nil) }
             )
         }
+        Menu("Tag") {
+            ForEach(Self.suggestedLightTags, id: \.self) { tag in
+                Button(tag) { store.toggleTag(message.id, tag: tag) }
+            }
+            if !message.tags.isEmpty {
+                Divider()
+                Button("Clear Tags") { store.clearTags(message.id) }
+            }
+        }
         Button("Mark Read") { store.markRead(message.id, read: true) }
         Button("Mark Unread") { store.markRead(message.id, read: false) }
         Button("File…") { onFile(message) }
@@ -428,6 +627,14 @@ struct MessageRowView: View {
                         Image(systemName: "flag.fill")
                             .foregroundStyle(flagColor)
                             .font(.caption)
+                    }
+                    ForEach(Array(message.tags.prefix(3)), id: \.self) { tag in
+                        Text(tag)
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .foregroundStyle(MuseTheme.ink.opacity(0.7))
+                            .background(MuseTheme.oatmeal.opacity(0.35), in: Capsule())
                     }
                     if !message.paperclipAttachments.isEmpty {
                         Image(systemName: "paperclip")
