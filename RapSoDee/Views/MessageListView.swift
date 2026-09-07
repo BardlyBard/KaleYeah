@@ -150,6 +150,7 @@ struct MessageListView: View {
                 .frame(maxWidth: 140)
                 .help("All / Unread / Flagged / Attachments")
 
+                scopeFilterMenu
                 dateFilterMenu
                 flagFilterMenu
                 if !availableTagsForMenu.isEmpty {
@@ -186,6 +187,95 @@ struct MessageListView: View {
 
     private var availableTagsForMenu: [String] {
         store.availableTags(in: store.messages)
+    }
+
+    private var scopeFilterMenu: some View {
+        Menu {
+            Button {
+                store.listScope = .thisFolder
+                store.listScopeAccountID = nil
+            } label: {
+                HStack {
+                    Text(MessageListScope.thisFolder.label)
+                    if store.listScope == .thisFolder {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+
+            if store.listScopeNeedsAccountPicker(for: selection) {
+                Menu {
+                    ForEach(store.accounts.sorted(by: { $0.sortOrder < $1.sortOrder })) { account in
+                        Button {
+                            store.listScope = .thisAccount
+                            store.listScopeAccountID = account.id
+                        } label: {
+                            HStack {
+                                Text(account.name)
+                                if store.listScope == .thisAccount,
+                                   store.resolvedListScopeAccountID(for: selection) == account.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(MessageListScope.thisAccount.label)
+                        if store.listScope == .thisAccount {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            } else {
+                Button {
+                    store.listScope = .thisAccount
+                    store.listScopeAccountID = store.accountID(for: selection)
+                } label: {
+                    HStack {
+                        Text(MessageListScope.thisAccount.label)
+                        if store.listScope == .thisAccount {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+
+            Button {
+                store.listScope = .allAccounts
+                store.listScopeAccountID = nil
+            } label: {
+                HStack {
+                    Text(MessageListScope.allAccounts.label)
+                    if store.listScope == .allAccounts {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+        } label: {
+            filterChipLabel(
+                title: scopeChipTitle,
+                systemImage: "scope",
+                active: store.listScope != .thisFolder
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("Limit list to this folder, one account (all folders), or all accounts")
+    }
+
+    private var scopeChipTitle: String {
+        switch store.listScope {
+        case .thisFolder:
+            return "Scope"
+        case .thisAccount:
+            if let id = store.resolvedListScopeAccountID(for: selection),
+               let account = store.account(for: id) {
+                return account.name
+            }
+            return "Account"
+        case .allAccounts:
+            return "All accounts"
+        }
     }
 
     private var dateFilterMenu: some View {

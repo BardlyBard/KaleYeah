@@ -21,6 +21,10 @@ final class DemoMailStore: MailStore {
     var flagFilterID: UUID? = nil
     /// When set, only messages carrying this light local tag.
     var tagFilter: String? = nil
+    /// Folder / account breadth for the list — ANDs with filter / date / flags / tags.
+    var listScope: MessageListScope = .thisFolder
+    /// When `listScope == .thisAccount` on One Inbox / Approve (no single account), the picked account.
+    var listScopeAccountID: UUID? = nil
     var searchText: String = ""
     /// Stage-1 notification stub — focusAware / vipOnly / mute
     var notificationPolicyRaw: String = "focusAware"
@@ -119,23 +123,19 @@ final class DemoMailStore: MailStore {
     func messages(for selection: LadderSelection) -> [MailMessage] {
         unsnoozeDue()
         var list: [MailMessage]
-        switch selection {
-        case .unifiedInbox:
-            let included = Set(accounts.filter(\.contributesToUnifiedInbox).map(\.id))
-            let inboxIDs = Set(folders.filter { $0.kind == .inbox && ($0.accountID.map(included.contains) ?? false) }.map(\.id))
-            list = messages.filter { inboxIDs.contains($0.folderID) && $0.snoozeUntil == nil }
-        case .approve:
-            let approveIDs = Set(folders.filter { $0.kind == .approve }.map(\.id))
-            list = messages.filter { approveIDs.contains($0.folderID) || $0.disposition == .pendingApproval }
-        case .folder(let id):
-            if let folder = folder(for: id), folder.kind == .snoozed {
-                list = messages.filter { $0.snoozeUntil != nil }
+        switch listScope {
+        case .allAccounts:
+            // Intentional search across the whole library — include Callie and every folder.
+            list = messages.filter { $0.snoozeUntil == nil }
+        case .thisAccount:
+            if let accountID = resolvedListScopeAccountID(for: selection) {
+                list = messages.filter { $0.accountID == accountID && $0.snoozeUntil == nil }
             } else {
-                list = messages.filter { $0.folderID == id && $0.snoozeUntil == nil }
+                // One Inbox / Approve with no account picked yet — stay on current ladder slice.
+                list = messagesForLadderSelection(selection)
             }
-        case .accountInbox(let accountID):
-            let inboxIDs = Set(folders.filter { $0.kind == .inbox && $0.accountID == accountID }.map(\.id))
-            list = messages.filter { inboxIDs.contains($0.folderID) && $0.snoozeUntil == nil }
+        case .thisFolder:
+            list = messagesForLadderSelection(selection)
         }
 
         if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -174,15 +174,64 @@ final class DemoMailStore: MailStore {
     }
 
 
-    /// True when any date / flag-color / tag refinement is active (not the All/Unread/… picker).
+
+    /// Ladder-only message slice (today's default Scope = This folder).
+    private func messagesForLadderSelection(_ selection: LadderSelection) -> [MailMessage] {
+        switch selection {
+        case .unifiedInbox:
+            let included = Set(accounts.filter(\.contributesToUnifiedInbox).map(\.id))
+            let inboxIDs = Set(folders.filter { $0.kind == .inbox && ($0.accountID.map(included.contains) ?? false) }.map(\.id))
+            return messages.filter { inboxIDs.contains($0.folderID) && $0.snoozeUntil == nil }
+        case .approve:
+            let approveIDs = Set(folders.filter { $0.kind == .approve }.map(\.id))
+            return messages.filter { approveIDs.contains($0.folderID) || $0.disposition == .pendingApproval }
+        case .folder(let id):
+            if let folder = folder(for: id), folder.kind == .snoozed {
+                return messages.filter { $0.snoozeUntil != nil }
+            } else {
+                return messages.filter { $0.folderID == id && $0.snoozeUntil == nil }
+            }
+        case .accountInbox(let accountID):
+            let inboxIDs = Set(folders.filter { $0.kind == .inbox && $0.accountID == accountID }.map(\.id))
+            return messages.filter { inboxIDs.contains($0.folderID) && $0.snoozeUntil == nil }
+        }
+    }
+
+    /// Account implied by the ladder selection, or the explicitly picked Scope account on One Inbox / Approve.
+    func accountID(for selection: LadderSelection) -> UUID? {
+        switch selection {
+        case .folder(let id):
+            return folder(for: id)?.accountID
+        case .accountInbox(let accountID):
+            return accountID
+        case .unifiedInbox, .approve:
+            return nil
+        }
+    }
+
+    func resolvedListScopeAccountID(for selection: LadderSelection) -> UUID? {
+        if let fromSelection = accountID(for: selection) {
+            return fromSelection
+        }
+        return listScopeAccountID
+    }
+
+    /// Whether Scope needs an account submenu (One Inbox / Approve have no single account).
+    func listScopeNeedsAccountPicker(for selection: LadderSelection) -> Bool {
+        accountID(for: selection) == nil
+    }
+
+    /// True when any date / flag-color / tag / scope refinement is active (not the All/Unread/… picker).
     var hasListRefinements: Bool {
-        dateFilter != .any || flagFilterID != nil || !(tagFilter?.isEmpty ?? true)
+        dateFilter != .any || flagFilterID != nil || !(tagFilter?.isEmpty ?? true) || listScope != .thisFolder
     }
 
     func clearListRefinements() {
         dateFilter = .any
         flagFilterID = nil
         tagFilter = nil
+        listScope = .thisFolder
+        listScopeAccountID = nil
         dateCustomStart = Calendar.current.startOfDay(for: Date())
         dateCustomEnd = Date()
     }

@@ -400,6 +400,21 @@ enum MessageDateFilter: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
+/// Breadth of the message list relative to the ladder — composes with filter chips.
+enum MessageListScope: String, CaseIterable, Identifiable, Codable, Sendable {
+    case thisFolder
+    case thisAccount
+    case allAccounts
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .thisFolder: return "This folder"
+        case .thisAccount: return "This account"
+        case .allAccounts: return "All accounts"
+        }
+    }
+}
+
 enum LadderSelection: Hashable {
     case unifiedInbox
     case approve
