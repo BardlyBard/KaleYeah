@@ -33,3 +33,6 @@ xcuserdata/
 # Never commit email dumps / EML backups
 *.eml
 *.EML
+
+# Local contacts export (may contain personal addresses)
+exports/RapSoDeeContacts/contacts.json

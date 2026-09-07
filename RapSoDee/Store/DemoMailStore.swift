@@ -19,6 +19,11 @@ final class DemoMailStore: MailStore {
     /// Soft muse chime when new mail arrives (default on).
     var playSoundForNewMail: Bool = true
 
+    // MARK: Shared contacts (account-agnostic; local JSON only)
+    var contacts: [RapSoDeeContact] = []
+    var contactsStatus: String = ""
+    var contactCount: Int { contacts.count }
+
     // MARK: Gmail live account
     var gmailSyncStatus: String = ""
     var gmailIsSyncing: Bool = false
@@ -92,6 +97,7 @@ final class DemoMailStore: MailStore {
         deduplicateLiveAccountShells()
         enforceCalliopeExcludedFromUnifiedInbox()
         loadMessageCacheFromDisk()
+        loadOrRebuildContacts()
         pendingServerOps = MailMessageCache.loadPendingServerOps()
         ensureApproveMailbox()
         injectApproveTestDraftIfNeeded()
@@ -1498,6 +1504,7 @@ final class DemoMailStore: MailStore {
             }
             persistMessageCache()
             await flushPendingServerOps(for: account)
+            refreshContactsAfterSync()
         } catch {
             gmailLastError = error.localizedDescription
             gmailSyncStatus = "Sync failed"
@@ -1533,6 +1540,7 @@ final class DemoMailStore: MailStore {
         if hasOffice {
             await syncOffice365Now() // syncs every live Microsoft 365 mailbox
         }
+        refreshContactsAfterSync()
     }
 
     func bootstrapLiveAccountsOnLaunch() async {
@@ -1573,6 +1581,7 @@ final class DemoMailStore: MailStore {
         } else if !accounts.isEmpty && messages.isEmpty && !gmailNeedsSetup {
             await syncGmailNow()
         }
+        refreshContactsAfterSync()
     }
 
     /// Recreate Inbox/Sent/Drafts/Archive/Trash if an account shell lost its folders
@@ -2547,6 +2556,7 @@ final class DemoMailStore: MailStore {
         if lastError == nil {
             office365NeedsSetup = false
         }
+        refreshContactsAfterSync()
     }
 
     /// Sync a single live Microsoft 365 mailbox using that account's token (never another mailbox's).
@@ -3731,6 +3741,63 @@ final class DemoMailStore: MailStore {
             copy.folderID = dest
             return copy
         }
+    }
+
+
+    // MARK: - Shared contacts
+
+    /// Load contacts.json; rebuild from mail if empty.
+    private func loadOrRebuildContacts() {
+        let loaded = ContactsStore.load()
+        if loaded.isEmpty, !messages.isEmpty {
+            rebuildContactsFromMail(reason: "first harvest from mail cache")
+        } else {
+            contacts = loaded
+            contactsStatus = loaded.isEmpty ? "No contacts yet — Sync or Rebuild." : "\(loaded.count) contacts"
+        }
+    }
+
+    /// Harvest after Sync (shared book across Gmail + Kale Yeah + Callie).
+    private func refreshContactsAfterSync() {
+        rebuildContactsFromMail(reason: "harvest after sync")
+    }
+
+    /// Rebuild shared contact list from non-junk mail. Does not touch Outlook/Gmail contacts.
+    @discardableResult
+    func rebuildContactsFromMail(reason: String = "rebuild") -> Int {
+        let own = accounts.map(\.email)
+        let harvested = ContactsStore.harvest(messages: messages, folders: folders, ownEmails: own)
+        contacts = harvested
+        ContactsStore.save(harvested)
+        // Best-effort repo export for private backup (sandbox may block; ignore failure).
+        if let repoExport = repoContactsExportDirectory() {
+            _ = ContactsStore.writeExport(to: repoExport)
+        }
+        contactsStatus = "\(harvested.count) contacts (\(reason))"
+        return harvested.count
+    }
+
+    func suggestContacts(matching query: String, limit: Int = 8) -> [RapSoDeeContact] {
+        ContactsStore.suggestions(matching: query, in: contacts, limit: limit)
+    }
+
+    private func repoContactsExportDirectory() -> URL? {
+        let candidates = [
+            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Developer/KaleYeah/exports/RapSoDeeContacts", isDirectory: true),
+            ContactsStore.contactsURL.deletingLastPathComponent().appendingPathComponent("export", isDirectory: true),
+        ]
+        for url in candidates {
+            do {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                let probe = url.appendingPathComponent(".write-probe")
+                try "ok".write(to: probe, atomically: true, encoding: .utf8)
+                try? FileManager.default.removeItem(at: probe)
+                return url
+            } catch {
+                continue
+            }
+        }
+        return nil
     }
 
     private func persistMessageCache() {

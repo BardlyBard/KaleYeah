@@ -58,6 +58,7 @@ struct SettingsView: View {
                         accountsGmailSection
                         accountsMicrosoft365Section
                         syncSection
+                        contactsSection
                         importEMLSection
                         aboutSection
                     case .creature:
@@ -525,6 +526,37 @@ struct SettingsView: View {
             .disabled(office365Busy || gmailBusy || store.isUniversalSyncing || store.gmailIsSyncing || store.office365IsSyncing)
         } header: {
             Text("Sync")
+        }
+    }
+
+
+    // MARK: - Contacts (shared book)
+
+    private var contactsSection: some View {
+        Section {
+            Text("One shared RapSoDee contact list across Gmail + Kale Yeah + Callie. Autofill works for any From account. Not synced into Outlook or Gmail contacts.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            LabeledContent("Contacts") {
+                Text("\(store.contactCount)")
+                    .font(.body.monospacedDigit())
+            }
+            if !store.contactsStatus.isEmpty {
+                Text(store.contactsStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Button("Rebuild from mail") {
+                let n = store.rebuildContactsFromMail(reason: "manual rebuild")
+                store.contactsStatus = "\(n) contacts (manual rebuild)"
+            }
+            .buttonStyle(.bordered)
+            Text("Stored under Application Support/RapSoDeeContacts/contacts.json. Optional export: exports/RapSoDeeContacts/ (see Scripts/backup-contacts.sh).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Contacts")
         }
     }
 

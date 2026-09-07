@@ -143,6 +143,17 @@ Notes:
 - Dates are preserved when Graph accepts `receivedDateTime` / `sentDateTime` on create.
 - Never commit `.eml` contents or tokens (see `.gitignore`).
 
+## Contacts (V1)
+
+RapSoDee keeps one **shared** contact list that transcends Gmail + Kale Yeah + Callie (account-agnostic). Harvested from non-junk mail (From on inbound, To/Cc on Sent). Skips noreply / mailer-daemon / your own mailbox addresses. **Not** synced into Outlook or Gmail native contacts.
+
+- On-disk: `…/Application Support/RapSoDeeContacts/contacts.json`
+- Compose To/Cc autocomplete ranks by recent + frequency (works for any From account)
+- Settings → Contacts: count + **Rebuild from mail**
+- Optional private backup: `Scripts/backup-contacts.sh` → `exports/RapSoDeeContacts/` (create a private GitHub repo yourself; do not make this public)
+
+**Try autofill:** Compose → type a few letters in To or Cc → pick a suggestion.
+
 ## Offline mail + differential Sync
 
 RapSoDee keeps a **durable on-disk mail index** under the sandboxed Application Support folder for bundle `local.rapsodee.mail` (`…/Application Support/RapSoDeeMailCache/`). After a successful hydrate, quit/relaunch shows list metadata offline without an empty flash. Full bodies may lazy-load on open (Graph) and are stored as sidecars; Sync never wipes local mail on a failed or empty fetch.

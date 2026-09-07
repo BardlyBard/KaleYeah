@@ -14,6 +14,11 @@ struct ComposeView: View {
 
     @State private var isSending = false
     @State private var sendError: String?
+    @State private var toSuggestions: [RapSoDeeContact] = []
+    @State private var ccSuggestions: [RapSoDeeContact] = []
+    @FocusState private var focusedRecipient: RecipientField?
+
+    private enum RecipientField: Hashable { case to, cc }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -227,12 +232,70 @@ struct ComposeView: View {
                 }
             }
             TextField("To", text: $draft.to)
+                .focused($focusedRecipient, equals: .to)
+                .onChange(of: draft.to) { _, newValue in
+                    toSuggestions = store.suggestContacts(matching: newValue)
+                }
+            if focusedRecipient == .to, !toSuggestions.isEmpty {
+                recipientSuggestionList(toSuggestions) { contact in
+                    draft.to = ContactsStore.applyingSuggestion(contact, toField: draft.to)
+                    toSuggestions = []
+                }
+            }
             TextField("Cc", text: $draft.cc)
+                .focused($focusedRecipient, equals: .cc)
+                .onChange(of: draft.cc) { _, newValue in
+                    ccSuggestions = store.suggestContacts(matching: newValue)
+                }
+            if focusedRecipient == .cc, !ccSuggestions.isEmpty {
+                recipientSuggestionList(ccSuggestions) { contact in
+                    draft.cc = ContactsStore.applyingSuggestion(contact, toField: draft.cc)
+                    ccSuggestions = []
+                }
+            }
             TextField("Subject", text: $draft.subject)
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .frame(maxHeight: 200)
+        .frame(maxHeight: toSuggestions.isEmpty && ccSuggestions.isEmpty ? 200 : 320)
+    }
+
+    private func recipientSuggestionList(
+        _ suggestions: [RapSoDeeContact],
+        onPick: @escaping (RapSoDeeContact) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Contacts")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(suggestions) { contact in
+                Button {
+                    onPick(contact)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.crop.circle")
+                            .foregroundStyle(MuseTheme.leaf)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(contact.displayName.isEmpty ? contact.email : contact.displayName)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.primary)
+                            if !contact.displayName.isEmpty {
+                                Text(contact.email)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Text("\(contact.timesSeen)×")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private var attachmentChips: some View {
