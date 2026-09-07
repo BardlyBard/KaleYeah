@@ -1,6 +1,7 @@
 import SwiftUI
 #if os(macOS)
 import AppKit
+import ObjectiveC
 #endif
 
 struct MessageListView: View {
@@ -56,7 +57,7 @@ struct MessageListView: View {
             .listStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
             .tint(MuseTheme.oatmeal)
-            .background(DisableListSelectionHighlight())
+            .background(MessageListAppKitTuning())
             .environment(\.defaultMinListRowHeight, 1)
         }
         .background(
@@ -482,8 +483,11 @@ struct MessageRowView: View {
 }
 
 #if os(macOS)
-/// Disables NSTableView’s accent-colored selection highlight so `listRowBackground` owns selection looks.
-private struct DisableListSelectionHighlight: NSViewRepresentable {
+/// AppKit tweaks for the SwiftUI message `List`:
+/// - Hide NSTableView’s accent selection so `listRowBackground` owns selection looks.
+/// - Install discrete mouse-wheel boost (~3×) so one notch moves roughly one row.
+///   Precise trackpad / Magic Mouse pixel deltas pass through unchanged (inertia intact).
+private struct MessageListAppKitTuning: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         view.isHidden = true
@@ -498,6 +502,10 @@ private struct DisableListSelectionHighlight: NSViewRepresentable {
             }
             if table.allowsMultipleSelection == false {
                 table.allowsMultipleSelection = true
+            }
+            if let scroll = table.enclosingScrollView {
+                // 3× discrete wheel only — do not also raise lineScroll (would stack).
+                MessageListWheelScrollView.installIfNeeded(on: scroll)
             }
         }
     }
@@ -520,6 +528,53 @@ private struct DisableListSelectionHighlight: NSViewRepresentable {
         if let table = root as? NSTableView { return table }
         for child in root.subviews {
             if let found = findTableView(in: child) { return found }
+        }
+        return nil
+    }
+}
+
+/// Speeds discrete mouse-wheel scrolling on the message list only.
+/// Local monitor amplifies notch deltas when the cursor is over a flagged `NSScrollView`;
+/// precise trackpad / Magic Mouse pixel deltas are returned unchanged (inertia intact).
+private enum MessageListWheelScrollView {
+    /// Derek reported ~3 notches per row; 3× → ~1 notch ≈ 1 row without shrinking rows.
+    fileprivate static let discreteWheelFactor: Double = 3
+    fileprivate static var boostKey: UInt8 = 0
+    private static var monitor: Any?
+
+    static func installIfNeeded(on scroll: NSScrollView) {
+        objc_setAssociatedObject(scroll, &boostKey, true, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            Self.amplifiedEvent(from: event) ?? event
+        }
+    }
+
+    private static func amplifiedEvent(from event: NSEvent) -> NSEvent? {
+        // Trackpad / Magic Mouse: leave precise pixel scrolling + inertia alone.
+        guard !event.hasPreciseScrollingDeltas else { return nil }
+        guard abs(event.scrollingDeltaY) > 0 || abs(event.scrollingDeltaX) > 0 else { return nil }
+        guard boostedScrollView(under: event) != nil else { return nil }
+        guard let cgEvent = event.cgEvent?.copy() else { return nil }
+        let factor = discreteWheelFactor
+        cgEvent.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: Double(event.deltaY) * factor)
+        cgEvent.setDoubleValueField(.scrollWheelEventDeltaAxis2, value: Double(event.deltaX) * factor)
+        cgEvent.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: Double(event.scrollingDeltaY) * factor)
+        cgEvent.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: Double(event.scrollingDeltaX) * factor)
+        return NSEvent(cgEvent: cgEvent)
+    }
+
+    private static func boostedScrollView(under event: NSEvent) -> NSScrollView? {
+        guard let window = event.window,
+              let content = window.contentView else { return nil }
+        let hit = content.hitTest(event.locationInWindow)
+        var node: NSView? = hit
+        while let view = node {
+            if let scroll = view as? NSScrollView,
+               objc_getAssociatedObject(scroll, &boostKey) as? Bool == true {
+                return scroll
+            }
+            node = view.superview
         }
         return nil
     }
